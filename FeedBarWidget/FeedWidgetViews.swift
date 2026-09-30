@@ -31,10 +31,15 @@ struct FeedWidgetEntryView: View {
     private var preferences: WidgetPreferences { entry.preferences }
     private var palette: FeedWidgetPalette { .init(preferences: preferences, systemScheme: colorScheme) }
     private var foreground: Color { palette.foreground }
+    private var usesLargeMedia: Bool { preferences.showsMedia && preferences.mediaSize == .large }
     private var denseRows: Bool { preferences.density == .compact && entry.pageSize > 2 }
     private var rowSpacing: CGFloat { denseRows ? 6 : 8 }
     private var bodyFontSize: CGFloat { FeedWidgetLayout.bodyFontSize(for: family, preferences: preferences) }
     private var previewHeight: CGFloat {
+        if usesLargeMedia {
+            if isSmall { return 72 - (preferences.textSize == .large ? 4 : 0) - (entry.errorMessage == nil ? 0 : 12) }
+            if !isCompact { return (preferences.textSize == .large ? 170 : 178) - (entry.errorMessage == nil ? 0 : 12) }
+        }
         if isSmall { return 55 - (preferences.textSize == .large ? 10 : 0) - (entry.errorMessage == nil ? 0 : 12) }
         if isCompact { return entry.errorMessage == nil ? 80 : 68 }
         return denseRows ? 68 : 108
@@ -46,7 +51,8 @@ struct FeedWidgetEntryView: View {
             if entry.posts.isEmpty {
                 emptyState
             } else if family == .systemExtraLarge {
-                // Two columns; compact density adds a third row.
+                // Two columns; large media uses one row and compact standard
+                // media uses three. Capacity comes from the same preference snapshot.
                 VStack(spacing: rowSpacing) {
                     ForEach(0..<((entry.pageSize + 1) / 2), id: \.self) { row in
                         HStack(alignment: .top, spacing: 16) {
@@ -183,6 +189,21 @@ struct FeedWidgetEntryView: View {
                         .frame(maxWidth: .infinity)
                         .frame(height: previewHeight)
                 }
+                if !post.text.isEmpty && lines > 0 {
+                    Text(post.text)
+                        .font(.system(size: bodyFontSize))
+                        .foregroundStyle(foreground.opacity(0.88))
+                        .lineLimit(lines)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        } else if usesLargeMedia, !isCompact, let media {
+            VStack(alignment: .leading, spacing: 4) {
+                authorLine(post)
+                mediaPreview(media, count: post.media.count)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: previewHeight)
                 if !post.text.isEmpty {
                     Text(post.text)
                         .font(.system(size: bodyFontSize))
@@ -191,6 +212,7 @@ struct FeedWidgetEntryView: View {
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                timestamp(post)
             }
         } else {
             HStack(alignment: .top, spacing: 10) {
@@ -209,7 +231,8 @@ struct FeedWidgetEntryView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if let media {
                     mediaPreview(media, count: post.media.count)
-                        .frame(width: isCompact ? 112 : denseRows ? 82 : 110, height: previewHeight)
+                        .frame(width: isCompact ? (usesLargeMedia ? 180 : 112) : denseRows ? 82 : 110,
+                               height: previewHeight)
                 }
             }
         }

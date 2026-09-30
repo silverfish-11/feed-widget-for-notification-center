@@ -5,23 +5,27 @@ struct WidgetPreferences: Codable, Equatable {
     enum TextSize: String, Codable, CaseIterable { case small, standard, large }
     enum Density: String, Codable, CaseIterable { case comfortable, compact }
     enum ImageFit: String, Codable, CaseIterable { case fit, fill }
+    enum MediaSize: String, Codable, CaseIterable { case standard, large }
 
     var appearance: Appearance = .dark
     var textSize: TextSize = .standard
     var density: Density = .comfortable
     var showsMedia = true
     var imageFit: ImageFit = .fill
+    var mediaSize: MediaSize = .standard
 
     init(appearance: Appearance = .dark, textSize: TextSize = .standard,
-         density: Density = .comfortable, showsMedia: Bool = true, imageFit: ImageFit = .fill) {
+         density: Density = .comfortable, showsMedia: Bool = true, imageFit: ImageFit = .fill,
+         mediaSize: MediaSize = .standard) {
         self.appearance = appearance
         self.textSize = textSize
         self.density = density
         self.showsMedia = showsMedia
         self.imageFit = imageFit
+        self.mediaSize = mediaSize
     }
 
-    private enum CodingKeys: String, CodingKey { case appearance, textSize, density, showsMedia, imageFit }
+    private enum CodingKeys: String, CodingKey { case appearance, textSize, density, showsMedia, imageFit, mediaSize }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -30,6 +34,7 @@ struct WidgetPreferences: Codable, Equatable {
         density = (try? values.decode(Density.self, forKey: .density)) ?? .comfortable
         showsMedia = (try? values.decode(Bool.self, forKey: .showsMedia)) ?? true
         imageFit = (try? values.decode(ImageFit.self, forKey: .imageFit)) ?? .fill
+        mediaSize = (try? values.decode(MediaSize.self, forKey: .mediaSize)) ?? .standard
     }
 
     static func load(directory: URL? = nil) throws -> Self {

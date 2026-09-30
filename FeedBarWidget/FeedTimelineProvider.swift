@@ -27,6 +27,9 @@ struct FeedEntry: TimelineEntry {
 
 enum FeedWidgetLayout {
     static func pageSize(for family: WidgetFamily, preferences: WidgetPreferences = .init()) -> Int {
+        if preferences.showsMedia && preferences.mediaSize == .large {
+            return family == .systemExtraLarge ? 2 : 1
+        }
         switch family {
         case .systemSmall: return 1
         case .systemMedium: return 1
@@ -46,6 +49,10 @@ enum FeedWidgetLayout {
 
     static func textLines(for family: WidgetFamily, preferences: WidgetPreferences,
                           hasMedia: Bool, hasError: Bool) -> Int {
+        if preferences.showsMedia && preferences.mediaSize == .large && hasMedia {
+            if family == .systemSmall { return 0 }
+            if family != .systemMedium { return 2 }
+        }
         switch family {
         case .systemSmall:
             return hasMedia ? 1 : (hasError ? 3 : 4)

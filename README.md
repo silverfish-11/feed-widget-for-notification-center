@@ -51,10 +51,14 @@ FeedBar requests **Start at Login** on first launch to keep the collector availa
 Choose **Preferences…** from the FeedBar menu bar icon, or the widget’s settings button. Changes save automatically.
 
 - **General:** refresh manually or every 5, 10, 15, 30, or 60 minutes; manage Start at Login; refresh now.
-- **Appearance:** system, light, or dark grayscale UI; small, standard, or large text; comfortable or compact density; show or hide media previews; fit entire images or fill the preview area.
+- **Appearance:** system, light, or dark grayscale UI; small, standard, or large text; comfortable or compact density; show or hide media previews; standard or large media; fit entire images or fill the preview area.
 - **Accounts:** check source status and open X or Instagram to sign in.
 
 Manual mode skips automatic startup, timed, and wake refreshes. Explicit refresh actions and finishing sign-in still collect posts. Changing the interval lets an active refresh finish. Widget preferences are shared locally with the extension; macOS controls when the refreshed appearance appears. Smaller widgets and larger text may limit the number of visible posts.
+
+For larger images, choose **Appearance → Media size → Large**. Large and extra-large widgets devote more space to each image and show fewer posts per page. The small and medium layouts also enlarge previews within their available space. Hide media to return to the selected feed density.
+
+To resize the widget, **Control-click it in Notification Center and choose a size**. FeedBar supports small, medium, large, and extra-large layouts; available choices depend on macOS and the widget location. Notification Center uses preset sizes, so the widget cannot provide a freely draggable resize border. See [Apple’s widget guide](https://support.apple.com/108996).
 
 ## Tests
 

@@ -16,6 +16,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let appearancePicker = NSPopUpButton()
     private let textPicker = NSPopUpButton()
     private let densityPicker = NSPopUpButton()
+    private let mediaSizePicker = NSPopUpButton()
     private let fitPicker = NSPopUpButton()
     private let loginToggle = NSButton(checkboxWithTitle: "Start FeedBar at login", target: nil, action: nil)
     private let mediaToggle = NSButton(checkboxWithTitle: "Show photos and video previews", target: nil, action: nil)
@@ -26,7 +27,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var preferences = WidgetPreferences()
 
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 460),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 550),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "FeedBar Preferences"
         window.isReleasedWhenClosed = false
@@ -51,9 +52,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         appearancePicker.selectItem(at: WidgetPreferences.Appearance.allCases.firstIndex(of: preferences.appearance) ?? 0)
         textPicker.selectItem(at: WidgetPreferences.TextSize.allCases.firstIndex(of: preferences.textSize) ?? 1)
         densityPicker.selectItem(at: WidgetPreferences.Density.allCases.firstIndex(of: preferences.density) ?? 0)
+        mediaSizePicker.selectItem(at: WidgetPreferences.MediaSize.allCases.firstIndex(of: preferences.mediaSize) ?? 0)
         fitPicker.selectItem(at: WidgetPreferences.ImageFit.allCases.firstIndex(of: preferences.imageFit) ?? 1)
         mediaToggle.state = preferences.showsMedia ? .on : .off
         fitPicker.isEnabled = preferences.showsMedia
+        mediaSizePicker.isEnabled = preferences.showsMedia
+        densityPicker.isEnabled = !preferences.showsMedia || preferences.mediaSize != .large
         loginToggle.state = loginEnabled ? .on : .off
         noticeLabel.stringValue = notice ?? ""
         for (key, label) in sourceLabels {
@@ -94,6 +98,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         configure(fitPicker, titles: WidgetPreferences.ImageFit.allCases.map {
             $0 == .fit ? "Fit entire image" : "Fill preview"
         }, action: #selector(changeFit), identifier: "settings.image-fit")
+        configure(mediaSizePicker, titles: WidgetPreferences.MediaSize.allCases.map {
+            $0 == .standard ? "Standard" : "Large"
+        }, action: #selector(changeMediaSize), identifier: "settings.media-size")
         loginToggle.target = self
         loginToggle.action = #selector(changeLogin)
         loginToggle.setAccessibilityIdentifier("settings.start-at-login")
@@ -114,8 +121,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             row("Text size", control: textPicker),
             row("Feed density", control: densityPicker),
             mediaToggle,
+            row("Media size", control: mediaSizePicker),
             row("Image framing", control: fitPicker),
-            note("Changes save automatically. Smaller widgets and larger text may show fewer posts. macOS widget styling can affect appearance.")
+            note("Large media uses fewer posts per page to give photos and video previews more space."),
+            separator(),
+            note("Widget size is set in Notification Center: Control-click the widget and choose a size.")
         ], spacing: 13)
         let accounts = stack([
             accountRow("X", key: "x", action: #selector(openX)),
@@ -146,7 +156,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             layout.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
             layout.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
             layout.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
-            pageContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 240),
+            pageContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 330),
             tabs.widthAnchor.constraint(equalTo: layout.widthAnchor),
             noticeLabel.heightAnchor.constraint(equalToConstant: 40)
         ])
@@ -246,6 +256,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
     @objc private func changeFit() {
         preferences.imageFit = WidgetPreferences.ImageFit.allCases[fitPicker.indexOfSelectedItem]
+        onPreferencesChange?(preferences)
+    }
+    @objc private func changeMediaSize() {
+        preferences.mediaSize = WidgetPreferences.MediaSize.allCases[mediaSizePicker.indexOfSelectedItem]
         onPreferencesChange?(preferences)
     }
     @objc private func changeMedia() {

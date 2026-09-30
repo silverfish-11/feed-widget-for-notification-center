@@ -18,11 +18,24 @@ struct WidgetPreferencesRegressionTests {
         let initial = try WidgetPreferences.load(directory: root)
         try expect(initial == defaults, "A missing preferences file must use the established widget defaults")
         try expect(!FileManager.default.fileExists(atPath: file.path), "Reading defaults must not create runtime files")
-        let chosen = WidgetPreferences(appearance: .light, textSize: .large, density: .compact, showsMedia: false, imageFit: .fit)
+        let chosen = WidgetPreferences(appearance: .light, textSize: .large, density: .compact, showsMedia: false, imageFit: .fit, mediaSize: .large)
         try chosen.save(directory: root)
         let restored = try WidgetPreferences.load(directory: root)
         try expect(restored == chosen, "Every appearance preference must survive an atomic save/load")
         let oldBytes = try Data(contentsOf: file)
+        var legacyObject = try JSONSerialization.jsonObject(with: oldBytes) as! [String: Any]
+        legacyObject.removeValue(forKey: "mediaSize")
+        try JSONSerialization.data(withJSONObject: legacyObject).write(to: file)
+        let legacy = try WidgetPreferences.load(directory: root)
+        var legacyExpected = chosen
+        legacyExpected.mediaSize = .standard
+        try expect(legacy == legacyExpected, "Older preferences without mediaSize must retain every existing choice and use standard images")
+        for invalidSize in ["\"future-size\"", "null", "42"] {
+            try Data("{\"mediaSize\":\(invalidSize),\"showsMedia\":false}".utf8).write(to: file)
+            let invalid = try WidgetPreferences.load(directory: root)
+            try expect(invalid.mediaSize == .standard && !invalid.showsMedia,
+                       "Unsupported image-size values must fall back without losing another valid preference")
+        }
         let malformed = Data("{\"appearance\": broken JSON".utf8)
         try malformed.write(to: file)
         do {
@@ -104,19 +117,32 @@ struct WidgetPreferencesRegressionTests {
         for density in WidgetPreferences.Density.allCases {
             for textSize in WidgetPreferences.TextSize.allCases {
                 for showsMedia in [true, false] {
-                    let preferences = WidgetPreferences(textSize: textSize, density: density, showsMedia: showsMedia)
-                    for family in families {
+                    for mediaSize in WidgetPreferences.MediaSize.allCases {
+                      let preferences = WidgetPreferences(textSize: textSize, density: density, showsMedia: showsMedia, mediaSize: mediaSize)
+                      for family in families {
                         let capacity = FeedWidgetLayout.pageSize(for: family, preferences: preferences)
                         let expected: Int
-                        switch family {
-                        case .systemSmall, .systemMedium: expected = 1
-                        case .systemExtraLarge: expected = density == .compact ? 6 : 4
-                        default: expected = density == .compact && textSize != .large ? 3 : 2
+                        if showsMedia && mediaSize == .large {
+                            expected = family == .systemExtraLarge ? 2 : 1
+                        } else {
+                            switch family {
+                            case .systemSmall, .systemMedium: expected = 1
+                            case .systemExtraLarge: expected = density == .compact ? 6 : 4
+                            default: expected = density == .compact && textSize != .large ? 3 : 2
+                            }
                         }
                         try expect(capacity == expected, "Density/text-size capacity must keep every widget row within its family")
                         try expect((1...6).contains(capacity), "Page capacity must stay within the intent's supported range")
                         let lines = FeedWidgetLayout.textLines(for: family, preferences: preferences, hasMedia: showsMedia, hasError: false)
-                        try expect(lines >= 1 && lines <= 5, "Text must have a bounded layout in every size/density")
+                        let omitsCaption = family == .systemSmall && showsMedia && mediaSize == .large
+                        try expect(omitsCaption ? lines == 0 : (1...5).contains(lines),
+                                   "Only the small larger-image layout may omit its caption to preserve navigation/status")
+                        if !showsMedia {
+                            let standardMedia = WidgetPreferences(textSize: textSize, density: density, showsMedia: false)
+                            try expect(capacity == FeedWidgetLayout.pageSize(for: family, preferences: standardMedia),
+                                       "Hiding large images must restore the chosen post density")
+                        }
+                      }
                     }
                 }
             }

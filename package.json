@@ -1,6 +1,6 @@
 {
   "name": "feedbar",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "private": true,
   "description": "Local extraction fixtures for the FeedBar macOS widget",
   "engines": {
