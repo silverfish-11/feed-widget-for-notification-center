@@ -1,4 +1,4 @@
-# FeedBar
+# feed widget for notification center
 
 A small native macOS Notification Center widget for your X and Instagram feeds. A menu bar app collects posts from signed-in WebKit sessions; the widget displays text, cached photos, video posters, and previous/next page controls. Open a post to view its full content on the original site.
 
