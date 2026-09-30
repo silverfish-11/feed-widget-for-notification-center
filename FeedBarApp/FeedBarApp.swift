@@ -104,10 +104,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func savePreferences(_ value: WidgetPreferences) {
+    private func savePreferences(_ change: (inout WidgetPreferences) -> Void) {
         do {
-            try value.save()
-            preferences = value
+            preferences = try WidgetPreferences.update(change)
             preferencesNotice = nil
             WidgetCenter.shared.reloadTimelines(ofKind: FeedBarConstants.widgetKind)
         } catch {

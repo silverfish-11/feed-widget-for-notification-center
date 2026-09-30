@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 struct WidgetPreferences: Codable, Equatable {
     enum Appearance: String, Codable, CaseIterable { case system, light, dark }
@@ -14,6 +15,36 @@ struct WidgetPreferences: Codable, Equatable {
     var imageFit: ImageFit = .fill
     var mediaSize: MediaSize = .standard
 
+    private struct ExpandedLayout: Codable, Equatable {
+        let density: Density
+        let mediaSize: MediaSize
+    }
+    private var expandedLayout: ExpandedLayout?
+    private static let processLock = NSLock()
+
+    var isFeedCompact: Bool {
+        density == .compact && !(showsMedia && mediaSize == .large)
+    }
+
+    mutating func toggleFeedCompact() {
+        if isFeedCompact {
+            if let expandedLayout {
+                density = expandedLayout.density
+                mediaSize = expandedLayout.mediaSize
+            } else {
+                density = .comfortable
+            }
+            clearExpandedLayout()
+        } else {
+            expandedLayout = ExpandedLayout(density: density, mediaSize: mediaSize)
+            density = .compact
+            if showsMedia { mediaSize = .standard }
+        }
+    }
+
+    /// Explicit layout edits replace the remembered choice; unrelated edits do not.
+    mutating func clearExpandedLayout() { expandedLayout = nil }
+
     init(appearance: Appearance = .dark, textSize: TextSize = .standard,
          density: Density = .comfortable, showsMedia: Bool = true, imageFit: ImageFit = .fill,
          mediaSize: MediaSize = .standard) {
@@ -25,7 +56,9 @@ struct WidgetPreferences: Codable, Equatable {
         self.mediaSize = mediaSize
     }
 
-    private enum CodingKeys: String, CodingKey { case appearance, textSize, density, showsMedia, imageFit, mediaSize }
+    private enum CodingKeys: String, CodingKey {
+        case appearance, textSize, density, showsMedia, imageFit, mediaSize, expandedLayout
+    }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -35,6 +68,7 @@ struct WidgetPreferences: Codable, Equatable {
         showsMedia = (try? values.decode(Bool.self, forKey: .showsMedia)) ?? true
         imageFit = (try? values.decode(ImageFit.self, forKey: .imageFit)) ?? .fill
         mediaSize = (try? values.decode(MediaSize.self, forKey: .mediaSize)) ?? .standard
+        expandedLayout = try? values.decode(ExpandedLayout.self, forKey: .expandedLayout)
     }
 
     static func load(directory: URL? = nil) throws -> Self {
@@ -55,6 +89,40 @@ struct WidgetPreferences: Codable, Equatable {
     }
 
     func save(directory: URL? = nil) throws {
+        try Self.withStorageLock(directory: directory) {
+            try saveUnlocked(directory: directory)
+        }
+    }
+
+    /// Apply a field edit or toggle to the latest saved values under one
+    /// cross-process transaction, so host and widget changes cannot be lost.
+    @discardableResult
+    static func update(directory: URL? = nil, _ change: (inout Self) -> Void) throws -> Self {
+        try withStorageLock(directory: directory) {
+            var preferences = try load(directory: directory)
+            change(&preferences)
+            try preferences.saveUnlocked(directory: directory)
+            return preferences
+        }
+    }
+
+    private static func withStorageLock<T>(directory: URL?, _ operation: () throws -> T) throws -> T {
+        processLock.lock()
+        defer { processLock.unlock() }
+        let folder = try FeedStore.storageDirectory(override: directory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let lockURL = folder.appendingPathComponent("widget-preferences.lock")
+        let descriptor = open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(descriptor) }
+        while flock(descriptor, LOCK_EX) != 0 {
+            if errno != EINTR { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        }
+        defer { flock(descriptor, LOCK_UN) }
+        return try operation()
+    }
+
+    private func saveUnlocked(directory: URL?) throws {
         let folder = try FeedStore.storageDirectory(override: directory)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

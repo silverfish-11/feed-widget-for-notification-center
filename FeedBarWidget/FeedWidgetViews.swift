@@ -106,6 +106,18 @@ struct FeedWidgetEntryView: View {
                 .disabled(entry.page + 1 >= entry.totalPages)
                 .accessibilityLabel("Next feed page")
             }
+            if !isSmall {
+                Button(intent: ToggleCompactFeedIntent()) {
+                    Image(systemName: preferences.isFeedCompact ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
+                        .frame(width: 18, height: isCompact ? 16 : 20)
+                        .background(preferences.isFeedCompact ? foreground.opacity(0.12) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 3))
+                }
+                .fixedSize()
+                .help(preferences.isFeedCompact ? "Expand feed" : "Compact feed")
+                .accessibilityLabel(preferences.isFeedCompact ? "Expand feed" : "Compact feed")
+                .accessibilityValue(preferences.isFeedCompact ? "Compact" : "Expanded")
+            }
             Link(destination: FeedBarConstants.refreshURL) {
                 Image(systemName: "arrow.clockwise")
             }

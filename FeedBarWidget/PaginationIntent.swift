@@ -1,6 +1,17 @@
 import AppIntents
 import WidgetKit
 
+struct ToggleCompactFeedIntent: AppIntent {
+    static var title: LocalizedStringResource = "Toggle compact feed"
+    static var description = IntentDescription("Switch between compact rows and the previous feed layout.")
+
+    func perform() async throws -> some IntentResult {
+        _ = try WidgetPreferences.update { $0.toggleFeedCompact() }
+        WidgetCenter.shared.reloadTimelines(ofKind: FeedBarConstants.widgetKind)
+        return .result()
+    }
+}
+
 struct NextPageIntent: AppIntent {
     static var title: LocalizedStringResource = "Next feed page"
     static var description = IntentDescription("Show the next page of saved posts.")

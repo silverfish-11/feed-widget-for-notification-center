@@ -11,6 +11,14 @@ struct WidgetPreferencesRegressionTests {
     }
 
     static func main() throws {
+        if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--toggle-worker",
+           let count = Int(CommandLine.arguments[3]), count > 0 {
+            let directory = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+            for _ in 0..<count {
+                try WidgetPreferences.update(directory: directory) { $0.toggleFeedCompact() }
+            }
+            return
+        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("FeedBarWidgetPreferences-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let file = root.appendingPathComponent("widget-preferences.json")
@@ -113,6 +121,8 @@ struct WidgetPreferencesRegressionTests {
         }
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: readOnlyRoot.path)
 
+        try compactToggleChecks(root: root)
+
         let families: [WidgetFamily] = [.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge]
         for density in WidgetPreferences.Density.allCases {
             for textSize in WidgetPreferences.TextSize.allCases {
@@ -166,6 +176,111 @@ struct WidgetPreferencesRegressionTests {
         let customized = FeedEntry(date: .now, posts: [], page: 0, totalPages: 1, pageSize: 3, snapshot: .init(), errorMessage: nil, preferences: chosen)
         try expect(customized.preferences == chosen, "Each entry must keep its own immutable preference snapshot")
         print("Passed \(assertions) isolated widget preference persistence and layout checks.")
+    }
+
+    static func compactToggleChecks(root: URL) throws {
+        for density in WidgetPreferences.Density.allCases {
+            for mediaSize in WidgetPreferences.MediaSize.allCases {
+                for showsMedia in [true, false] {
+                    let original = WidgetPreferences(appearance: .light, textSize: .large,
+                                                     density: density, showsMedia: showsMedia,
+                                                     imageFit: .fit, mediaSize: mediaSize)
+                    var toggled = original
+                    let beganCompact = original.isFeedCompact
+                    toggled.toggleFeedCompact()
+                    try expect(toggled.isFeedCompact != beganCompact, "Each click must change the active compact state, including existing Compact preferences")
+                    try expect(toggled.appearance == original.appearance && toggled.textSize == original.textSize &&
+                               toggled.showsMedia == original.showsMedia && toggled.imageFit == original.imageFit,
+                               "Compacting must preserve unrelated appearance choices and media visibility")
+                    if beganCompact {
+                        try expect(toggled.density == .comfortable && toggled.mediaSize == original.mediaSize,
+                                   "Existing Compact preferences without a remembered layout must expand without replacing media size")
+                    } else {
+                        try expect(toggled.density == .compact && (!showsMedia || toggled.mediaSize == .standard),
+                                   "Compacting must override visible Large media so the feed actually becomes denser")
+                        let data = try JSONEncoder().encode(toggled)
+                        var restored = try JSONDecoder().decode(WidgetPreferences.self, from: data)
+                        try expect(restored == toggled, "The remembered expanded layout must survive persistence")
+                        restored.toggleFeedCompact()
+                        try expect(restored == original, "Expanding must exactly restore the previous density and media size")
+                    }
+                }
+            }
+        }
+
+        var retained = WidgetPreferences(density: .comfortable, mediaSize: .large)
+        retained.toggleFeedCompact()
+        retained.appearance = .light
+        retained.textSize = .large
+        retained.imageFit = .fit
+        retained.toggleFeedCompact()
+        try expect(retained == WidgetPreferences(appearance: .light, textSize: .large, imageFit: .fit, mediaSize: .large),
+                   "Unrelated changes made while compacted must survive restoring the expanded layout")
+
+        for field in ["density", "mediaSize", "showsMedia"] {
+            var manuallyEdited = WidgetPreferences(density: .comfortable, mediaSize: .large)
+            manuallyEdited.toggleFeedCompact()
+            switch field {
+            case "density": manuallyEdited.density = .compact
+            case "mediaSize": manuallyEdited.mediaSize = .standard
+            default: manuallyEdited.showsMedia = false
+            }
+            manuallyEdited.clearExpandedLayout()
+            manuallyEdited.toggleFeedCompact()
+            try expect(manuallyEdited.density == .comfortable && manuallyEdited.mediaSize == .standard,
+                       "An explicit \(field) edit must discard the old Large media restoration state")
+        }
+        let malformedMemory = Data("{\"density\":\"compact\",\"expandedLayout\":{\"density\":\"future\",\"mediaSize\":\"large\"}}".utf8)
+        var fallback = try JSONDecoder().decode(WidgetPreferences.self, from: malformedMemory)
+        fallback.toggleFeedCompact()
+        try expect(fallback.density == .comfortable && fallback.mediaSize == .standard,
+                   "An unknown remembered layout must safely fall back to the existing Compact expansion behavior")
+
+        let directory = root.appendingPathComponent("compact-transactions")
+        let initial = WidgetPreferences(mediaSize: .large)
+        try initial.save(directory: directory)
+        let staleWindow = try WidgetPreferences.load(directory: directory)
+        let compacted = try WidgetPreferences.update(directory: directory) { $0.toggleFeedCompact() }
+        try expect(compacted.isFeedCompact, "The transactional toggle must return the values actually written")
+        let appearance = staleWindow.appearance == .light ? WidgetPreferences.Appearance.dark : .light
+        let patched = try WidgetPreferences.update(directory: directory) { $0.appearance = appearance }
+        try expect(patched.isFeedCompact && patched.appearance == appearance,
+                   "A field edit from a stale Preferences window must preserve the latest widget compact state")
+        let expanded = try WidgetPreferences.update(directory: directory) { $0.toggleFeedCompact() }
+        try expect(expanded.mediaSize == .large && expanded.density == .comfortable && expanded.appearance == appearance,
+                   "A later toggle must use current storage and preserve an intervening host edit")
+        let corrupt = Data("{broken preferences".utf8)
+        let file = directory.appendingPathComponent("widget-preferences.json")
+        try corrupt.write(to: file)
+        var invoked = false
+        do {
+            _ = try WidgetPreferences.update(directory: directory) { invoked = true; $0.toggleFeedCompact() }
+            throw Failure(message: "A compact transaction silently reset corrupt preferences")
+        } catch is DecodingError { assertions += 1 }
+        try expect(!invoked && tryData(file) == corrupt,
+                   "A failed transaction must preserve corrupt bytes and never apply the change")
+        try WidgetPreferences().save(directory: directory)
+
+        // Separate processes exercise the file lock, rather than merely serializing
+        // Swift closures in this test process. Odd parity proves no toggle was lost.
+        var workers: [Process] = []
+        for _ in 0..<3 {
+            let worker = Process()
+            worker.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+            worker.arguments = ["--toggle-worker", directory.path, "17"]
+            try worker.run()
+            workers.append(worker)
+        }
+        _ = try WidgetPreferences.update(directory: directory) { $0.appearance = .light }
+        for worker in workers {
+            worker.waitUntilExit()
+            try expect(worker.terminationStatus == 0, "Every cross-process compact transaction must succeed")
+        }
+        let concurrent = try WidgetPreferences.load(directory: directory)
+        var expected = WidgetPreferences(appearance: .light)
+        expected.toggleFeedCompact()
+        try expect(concurrent == expected,
+                   "Concurrent host edits and 51 widget toggles must preserve both final parity and unrelated choices")
     }
 
     static func tryData(_ file: URL) -> Data? { try? Data(contentsOf: file) }

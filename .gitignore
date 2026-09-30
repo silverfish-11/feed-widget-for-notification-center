@@ -42,6 +42,7 @@ widget-pages.json
 widget-pages.lock
 widget-pages.corrupt-*.json
 widget-preferences.json*
+widget-preferences.lock
 widget-preferences.corrupt-*.json
 *.sqlite*
 *.db

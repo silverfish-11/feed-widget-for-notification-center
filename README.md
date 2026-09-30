@@ -58,6 +58,8 @@ Manual mode skips automatic startup, timed, and wake refreshes. Explicit refresh
 
 For larger images, choose **Appearance → Media size → Large**. Large and extra-large widgets devote more space to each image and show fewer posts per page. The small and medium layouts also enlarge previews within their available space. Hide media to return to the selected feed density.
 
+Use the **Compact feed** button in the top rail of medium and larger widgets to switch to compact rows with standard previews. Press it again to restore the previous layout, including large images. The highlighted button means the feed is compact. Changing density, media size, or media visibility in Preferences replaces that remembered layout; other appearance changes are retained.
+
 To resize the widget, **Control-click it in Notification Center and choose a size**. FeedBar supports small, medium, large, and extra-large layouts; available choices depend on macOS and the widget location. Notification Center uses preset sizes, so the widget cannot provide a freely draggable resize border. See [Apple’s widget guide](https://support.apple.com/108996).
 
 ## Tests

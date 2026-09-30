@@ -4,7 +4,7 @@ import Cocoa
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     var onRefreshMinutesChange: ((Int) -> Void)?
-    var onPreferencesChange: ((WidgetPreferences) -> Void)?
+    var onPreferencesChange: (((inout WidgetPreferences) -> Void) -> Void)?
     var onLaunchAtLoginChange: ((Bool) -> Void)?
     var onOpenSource: ((String) -> Void)?
     var onRefresh: (() -> Void)?
@@ -24,7 +24,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let sourceLabels = ["x": NSTextField(wrappingLabelWithString: "Not connected"),
                                 "ig": NSTextField(wrappingLabelWithString: "Not connected")]
     private var pages: [NSView] = []
-    private var preferences = WidgetPreferences()
 
     init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 550),
@@ -47,7 +46,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     func update(refreshMinutes: Int, preferences: WidgetPreferences, loginEnabled: Bool,
                 snapshot: FeedSnapshot, notice: String?) {
-        self.preferences = preferences
         refreshPicker.selectItem(withTag: refreshMinutes)
         appearancePicker.selectItem(at: WidgetPreferences.Appearance.allCases.firstIndex(of: preferences.appearance) ?? 0)
         textPicker.selectItem(at: WidgetPreferences.TextSize.allCases.firstIndex(of: preferences.textSize) ?? 1)
@@ -243,28 +241,37 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     @objc private func openX() { onOpenSource?("x") }
     @objc private func openInstagram() { onOpenSource?("ig") }
     @objc private func changeAppearance() {
-        preferences.appearance = WidgetPreferences.Appearance.allCases[appearancePicker.indexOfSelectedItem]
-        onPreferencesChange?(preferences)
+        let value = WidgetPreferences.Appearance.allCases[appearancePicker.indexOfSelectedItem]
+        onPreferencesChange? { $0.appearance = value }
     }
     @objc private func changeText() {
-        preferences.textSize = WidgetPreferences.TextSize.allCases[textPicker.indexOfSelectedItem]
-        onPreferencesChange?(preferences)
+        let value = WidgetPreferences.TextSize.allCases[textPicker.indexOfSelectedItem]
+        onPreferencesChange? { $0.textSize = value }
     }
     @objc private func changeDensity() {
-        preferences.density = WidgetPreferences.Density.allCases[densityPicker.indexOfSelectedItem]
-        onPreferencesChange?(preferences)
+        let value = WidgetPreferences.Density.allCases[densityPicker.indexOfSelectedItem]
+        onPreferencesChange? {
+            $0.density = value
+            $0.clearExpandedLayout()
+        }
     }
     @objc private func changeFit() {
-        preferences.imageFit = WidgetPreferences.ImageFit.allCases[fitPicker.indexOfSelectedItem]
-        onPreferencesChange?(preferences)
+        let value = WidgetPreferences.ImageFit.allCases[fitPicker.indexOfSelectedItem]
+        onPreferencesChange? { $0.imageFit = value }
     }
     @objc private func changeMediaSize() {
-        preferences.mediaSize = WidgetPreferences.MediaSize.allCases[mediaSizePicker.indexOfSelectedItem]
-        onPreferencesChange?(preferences)
+        let value = WidgetPreferences.MediaSize.allCases[mediaSizePicker.indexOfSelectedItem]
+        onPreferencesChange? {
+            $0.mediaSize = value
+            $0.clearExpandedLayout()
+        }
     }
     @objc private func changeMedia() {
-        preferences.showsMedia = mediaToggle.state == .on
-        onPreferencesChange?(preferences)
+        let value = mediaToggle.state == .on
+        onPreferencesChange? {
+            $0.showsMedia = value
+            $0.clearExpandedLayout()
+        }
     }
     func windowDidBecomeKey(_ notification: Notification) { onActivation?() }
 }
