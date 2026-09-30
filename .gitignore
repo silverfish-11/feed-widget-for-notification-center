@@ -1,0 +1,48 @@
+# Local builds and generated Xcode files
+build/
+DerivedData/
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+*.xcuserstate
+
+# Local dependencies and system metadata
+node_modules/
+.DS_Store
+*.log
+
+# Credentials, signing materials, and local configuration
+.env
+.env.*
+!.env.example
+.npmrc
+.netrc
+*.local
+*.local.*
+*.p12
+*.pfx
+*.pem
+*.key
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+
+# Runtime data and packaged applications
+*.app/
+*.appex/
+*.dSYM/
+*.zip
+*.dmg
+*.pkg
+feed-v2.json*
+media-cache/
+Media/
+widget-pages.json
+widget-pages.lock
+widget-pages.corrupt-*.json
+*.sqlite*
+*.db
+*.cookies
+Cookies/
+WebKit/

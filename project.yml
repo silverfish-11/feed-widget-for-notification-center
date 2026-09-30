@@ -1,0 +1,91 @@
+name: FeedBar
+options:
+  deploymentTarget:
+    macOS: "14.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "2.5"
+    CURRENT_PROJECT_VERSION: "7"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_INJECT_BASE_ENTITLEMENTS: false
+    REGISTER_APP_GROUPS: false
+    PROVISIONING_PROFILE_SPECIFIER: ""
+    ENABLE_HARDENED_RUNTIME: true
+    ENABLE_DEBUG_DYLIB: false
+    FEEDBAR_BUILD_ID: local
+    FEEDBAR_APP_GROUP: ""
+
+targets:
+  FeedBarApp:
+    type: application
+    platform: macOS
+    sources:
+      - path: FeedBarApp/FeedBarApp.swift
+      - path: FeedBarApp/ScraperManager.swift
+      - path: FeedBarApp/MediaPreviewDownloader.swift
+      - path: FeedBarApp/JSScripts.swift
+      - path: Shared
+    info:
+      path: FeedBarApp/Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        FeedBarBuildID: $(FEEDBAR_BUILD_ID)
+        FeedBarAppGroup: $(FEEDBAR_APP_GROUP)
+        LSUIElement: true
+        CFBundleURLTypes:
+          - CFBundleURLName: com.feedbar.app
+            CFBundleTypeRole: Viewer
+            CFBundleURLSchemes:
+              - feedbar
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    entitlements:
+      path: FeedBarApp/FeedBar.entitlements
+      properties:
+        com.apple.security.network.client: true
+        com.apple.security.application-groups:
+          - $(FEEDBAR_APP_GROUP)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.feedbar.app
+        PRODUCT_NAME: FeedBar
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@executable_path/../Frameworks"
+    dependencies:
+      - target: FeedBarWidgetExtension
+        embed: true
+
+  FeedBarWidgetExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: FeedBarWidget
+      - path: Shared
+    info:
+      path: FeedBarWidget/Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        FeedBarBuildID: $(FEEDBAR_BUILD_ID)
+        FeedBarAppGroup: $(FEEDBAR_APP_GROUP)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: FeedBarWidget/FeedBarWidget.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - $(FEEDBAR_APP_GROUP)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.feedbar.app.widget
+        PRODUCT_NAME: FeedBarWidget
+        APPLICATION_EXTENSION_API_ONLY: true
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@executable_path/../Frameworks"
+          - "@executable_path/../../../../Frameworks"
