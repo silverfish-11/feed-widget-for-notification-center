@@ -28,6 +28,8 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
     private var active: Attempt?
     private var sourceGenerations: [String: UUID] = [:]
     private let mediaDownloader = MediaPreviewDownloader()
+    private var replyResolver: FeedReplyContextResolver?
+    private var replyHostWindow: NSWindow?
     private var mediaPublishWork: DispatchWorkItem?
     private let logger = Logger(subsystem: "com.feedbar.app", category: "scraper")
     private let sourceKeys = ["x", "ig"]
@@ -70,6 +72,16 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
             snapshot.sources[key] = state
             makeWebView(key: key)
         }
+        let resolver = FeedReplyContextResolver(dataStore: webViews["x"]!.configuration.websiteDataStore)
+        let window = NSWindow(contentRect: NSRect(x: -12000, y: -12000, width: 900, height: 900),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.collectionBehavior = [.stationary, .ignoresCycle]
+        resolver.webView.autoresizingMask = [.width, .height]
+        window.contentView = resolver.webView
+        window.orderBack(nil)
+        replyResolver = resolver
+        replyHostWindow = window
     }
 
     private func makeWebView(key: String) {
@@ -106,6 +118,7 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
 
     func stop() {
         stopped = true
+        replyResolver?.cancel()
         sourceGenerations.removeAll()
         mediaDownloader.cancel()
         mediaPublishWork?.cancel()
@@ -147,6 +160,7 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
     private func startSource(_ key: String) {
         guard webViews[key] != nil, feedURLs[key] != nil else { runNextSource(); return }
         let id = UUID()
+        if key == "x" { replyResolver?.cancel() }
         sourceGenerations[key] = id
         mediaDownloader.cancel(source: key)
         logger.info("Refresh started source=\(key, privacy: .public)")
@@ -332,8 +346,24 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
         updateState(attempt.key) { state in
             state = Self.applyingResult(to: state, status: status, message: message, posts: posts)
         }
-        if status == "ready", let posts { cacheMedia(in: posts, source: attempt.key, generation: id) }
+        if status == "ready", let posts {
+            cacheMedia(in: posts, source: attempt.key, generation: id)
+            if attempt.key == "x" { resolveReplyContexts(in: posts, generation: id) }
+        }
         runNextSource()
+    }
+
+    private func resolveReplyContexts(in posts: [FeedPost], generation: UUID) {
+        guard !stopped, !sourceIsInUse("x") else { return }
+        replyResolver?.start(posts: posts, script: JSScripts.xReplyContextExtraction(for:)) { [weak self] postID, raw in
+            guard let self, !self.stopped, !self.sourceIsInUse("x"), self.sourceGenerations["x"] == generation,
+                  var state = self.snapshot.sources["x"], Self.applyResolvedReply(raw, postID: postID, to: &state.posts) else { return }
+            self.snapshot.sources["x"] = state
+            self.persistSnapshot()
+            if let updated = state.posts.first(where: { $0.id == postID }) {
+                self.cacheMedia(in: [updated], source: "x", generation: generation)
+            }
+        }
     }
 
     private func cacheMedia(in posts: [FeedPost], source: String, generation: UUID) {
@@ -438,6 +468,7 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
     func showLogin(key: String, title: String) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let webView = webViews[key] else { return }
+        if key == "x" { replyResolver?.cancel() }
         if loginKey == key { loginWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
         loginWindow?.close()
         loginKey = key // Set before cancellation so the next source won't start this one.
@@ -548,6 +579,7 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
             signature.combine(post.id)
             signature.combine(post.text) // Compare privately; never log post contents.
             signature.combine(post.quotedPost)
+            signature.combine(post.replyContext)
             for media in post.media {
                 signature.combine(media.cacheKey)
                 signature.combine(media.url)
@@ -576,6 +608,15 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
                 }
                 posts[index].quotedPost = quote
             }
+            if var context = posts[index].replyContext, var parent = context.parent, !parent.isUnavailable {
+                for attachment in parent.media.indices where parent.media[attachment].cacheKey == cacheKey {
+                    guard parent.media[attachment].localPreviewFile != filename else { continue }
+                    parent.media[attachment].localPreviewFile = filename
+                    changed = true
+                }
+                context.parent = parent
+                posts[index].replyContext = context
+            }
         }
         return changed
     }
@@ -598,6 +639,7 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
               id.range(of: platform == "x" ? "^[0-9]+$" : "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else { return nil }
         let previous = previous?.id == id && previous?.platform == platform ? previous : nil
         let text = dict["text"] as? String ?? ""
+        let reply = platform == "x" ? parseReplyContext(dict["replyContext"], previous: previous?.replyContext, postID: id) : nil
         var quote = platform == "x" ? parseQuotedPost(dict["quotedPost"], previous: previous?.quotedPost) : nil
         if var identified = quote, !identified.isUnavailable {
             let legacyMedia = Dictionary((previous?.media ?? []).map { ($0.cacheKey, $0) }, uniquingKeysWith: { a, _ in a })
@@ -612,7 +654,7 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
         // on every pass. Explicit current parent attachments still win below.
         let priorMedia = (previous?.media ?? []).filter { !quoteKeys.contains($0.cacheKey) }
         let media = parseMedia(dict["media"], previous: priorMedia)
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !media.isEmpty || quote != nil else { return nil }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !media.isEmpty || quote != nil || reply != nil else { return nil }
         // No fabricated freshness: unknown dates stay unknown and sort to the end.
         let newlyIdentifiedQuoteDate = quote?.timestamp != nil && previous?.quotedPost?.timestamp == nil
         let priorDate = newlyIdentifiedQuoteDate && previous?.timestamp == quote?.timestamp ? nil : previous?.timestamp
@@ -623,7 +665,48 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
                         text: text, timestamp: date,
                         likes: max(0, dict["likes"] as? Int ?? 0),
                         reposts: max(0, dict["reposts"] as? Int ?? 0),
-                        comments: max(0, dict["comments"] as? Int ?? 0), media: media, quotedPost: quote)
+                        comments: max(0, dict["comments"] as? Int ?? 0), media: media, quotedPost: quote, replyContext: reply)
+    }
+
+    /// Detail enrichment changes only the existing target's reply context. It can
+    /// never insert/reorder posts, overwrite their captions, or change attribution.
+    @discardableResult
+    static func applyResolvedReply(_ raw: [String: Any], postID: String, to posts: inout [FeedPost]) -> Bool {
+        guard raw["id"] as? String == postID,
+              let index = posts.firstIndex(where: { $0.platform == "x" && $0.id == postID }),
+              posts[index].replyContext != nil,
+              let context = raw["replyContext"] as? [String: Any],
+              let parent = context["parent"] as? [String: Any],
+              FeedReplyResolutionPolicy.acceptsParent(parent, targetID: postID) else { return false }
+        if let knownID = posts[index].replyContext?.parent?.id, let parentID = parent["id"] as? String,
+           knownID != parentID { return false }
+        guard let reply = parseReplyContext(context, previous: posts[index].replyContext, postID: postID),
+              reply.parent != nil, reply != posts[index].replyContext else { return false }
+        posts[index].replyContext = reply
+        return true
+    }
+
+    private static func parseReplyContext(_ raw: Any?, previous: FeedReplyContext?, postID: String) -> FeedReplyContext? {
+        guard let dict = raw as? [String: Any] else { return previous }
+        var seen = Set<String>()
+        var handles = (dict["handles"] as? [String] ?? []).prefix(20).compactMap { raw -> String? in
+            let handle = raw.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+            guard handle.range(of: "^[A-Za-z0-9_]{1,15}$", options: .regularExpression) != nil,
+                  seen.insert(handle.lowercased()).inserted else { return nil }
+            return handle
+        }
+        if handles.isEmpty { handles = previous?.handles ?? [] }
+        var parent = previous?.parent
+        if let rawParent = dict["parent"] as? [String: Any], FeedReplyResolutionPolicy.acceptsParent(rawParent, targetID: postID) {
+            let candidate = parseQuotedPost(rawParent, previous: previous?.parent)
+            if let knownID = previous?.parent?.id, let newID = candidate?.id, knownID != newID {
+                parent = previous?.parent // The reply-to relationship cannot change.
+            } else { parent = candidate }
+        }
+        if handles.isEmpty, let handle = parent?.handle,
+           handle.range(of: "^[A-Za-z0-9_]{1,15}$", options: .regularExpression) != nil { handles = [handle] }
+        guard !handles.isEmpty || parent != nil || dict["handles"] != nil || dict["parent"] != nil else { return previous }
+        return FeedReplyContext(handles: Array(handles.prefix(10)), parent: parent)
     }
 
     private static func parseMedia(_ raw: Any?, previous: [FeedMedia]) -> [FeedMedia] {

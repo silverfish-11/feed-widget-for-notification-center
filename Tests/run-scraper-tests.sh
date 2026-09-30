@@ -28,6 +28,7 @@ xcrun swiftc "$project_root"/Shared/*.swift \
     "$project_root/FeedBarApp/FeedSettings.swift" \
     "$project_root/FeedBarApp/ScraperManager.swift" \
     "$project_root/FeedBarApp/MediaPreviewDownloader.swift" \
+    "$project_root/FeedBarApp/FeedReplyContextResolver.swift" \
     "$tests_root/ScraperRegression.swift" \
     -framework Cocoa -framework WebKit -framework WidgetKit \
     -o "$scratch/scraper-regression"
@@ -37,7 +38,7 @@ cat > "$scratch/ExportScripts.swift" <<'SWIFT'
 import Foundation
 @main struct ExportScripts {
     static func main() throws {
-        let payload = ["x": JSScripts.xExtraction, "ig": JSScripts.igExtraction]
+        let payload = ["x": JSScripts.xExtraction, "ig": JSScripts.igExtraction, "xReply": JSScripts.xReplyContextExtraction(for: "300")]
         FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: payload))
     }
 }

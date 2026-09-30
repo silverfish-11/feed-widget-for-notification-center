@@ -77,8 +77,97 @@ struct ScraperRegression {
         precondition(ScraperManager.availableSources(["x", "ig"], loginKey: nil, popupSources: ["x", "x"]) == ["ig"])
         precondition(ScraperManager.availableSources(["x", "ig"], loginKey: nil, popupSources: []).count == 2)
         checkQuotedPosts()
+        checkReplyContexts()
         checkDownloader()
-        print("Scraper regression checks passed: failure retention, source isolation, confirmed-empty clearing, ISO dates, stable IDs, quoted attribution/hydration and targeted caching, cached-media retention, bounded cookie-free preview downloads, deferred-media settling, bounded transient recovery, source-owned auth lifecycle.")
+        print("Scraper regression checks passed: failure retention, source isolation, confirmed-empty clearing, ISO dates, stable IDs, quoted/reply attribution, bounded parent enrichment, hydration and targeted caching, cached-media retention, bounded cookie-free preview downloads, deferred-media settling, bounded transient recovery, source-owned auth lifecycle.")
+    }
+
+    static func checkReplyContexts() {
+        let parentURL = "https://pbs.twimg.com/media/reply-parent.jpg"
+        let ownURL = "https://pbs.twimg.com/media/reply-own.jpg"
+        let rawParent: [String: Any] = ["id": "700", "author": "Parent Fixture", "handle": "parent_fixture",
+            "text": "Original parent", "media": [["kind": "image", "url": parentURL]]]
+        let raw: [String: Any] = ["id": "701", "author": "Reply Fixture", "text": "Reply caption",
+            "media": [["kind": "image", "url": ownURL]],
+            "quotedPost": ["id": "702", "author": "Quote Fixture", "text": "Separate quote"],
+            "replyContext": ["handles": ["@parent_fixture", "PARENT_FIXTURE", "invalid/path", "second"], "parent": rawParent]]
+        let parsed = ScraperManager.parsePost(raw, platform: "x")!
+        precondition(parsed.replyContext?.handles == ["parent_fixture", "second"])
+        precondition(parsed.author == "Reply Fixture" && parsed.text == "Reply caption")
+        precondition(parsed.replyContext?.parent?.id == "700" && parsed.replyContext?.parent?.text == "Original parent")
+        precondition(parsed.media.count == 1 && parsed.media[0].url == ownURL && parsed.quotedPost?.id == "702")
+        precondition(parsed.allMedia.count == 2)
+        precondition(ScraperManager.parsePost(raw, platform: "ig")?.replyContext == nil)
+        let unknown = ScraperManager.parsePost(["id": "701", "text": "Reply caption", "replyContext": ["handles": [], "parent": NSNull()]], platform: "x")!
+        precondition(unknown.replyContext != nil && FeedReplyResolutionPolicy.needsResolution(unknown))
+        var cached = parsed
+        let parentKey = cached.replyContext!.parent!.media[0].cacheKey
+        cached.replyContext?.parent?.media[0].localPreviewFile = parentKey + ".jpg"
+        let missing = ScraperManager.parsePost(["id": "701", "text": "Updated reply"], platform: "x", previous: cached)!
+        precondition(missing.replyContext == cached.replyContext)
+        let sparse = ScraperManager.parsePost(["id": "701", "text": "Updated reply", "replyContext": ["handles": [], "parent": ["id": "700", "media": []]]], platform: "x", previous: cached)!
+        precondition(sparse.replyContext == cached.replyContext)
+        let conflicting = ScraperManager.parsePost(["id": "701", "text": "Updated reply", "replyContext": ["handles": ["other"], "parent": ["id": "999", "text": "Unrelated parent"]]], platform: "x", previous: cached)!
+        precondition(conflicting.replyContext?.parent == cached.replyContext?.parent)
+        let selfParent = ScraperManager.parsePost(["id": "701", "text": "Reply", "replyContext": ["handles": ["parent_fixture"], "parent": ["id": "701", "text": "Itself"]]], platform: "x")!
+        precondition(selfParent.replyContext?.parent == nil)
+        let unavailableRaw: [String: Any] = ["id": "701", "replyContext": ["handles": ["parent_fixture"], "parent": ["id": NSNull(), "isUnavailable": true]]]
+        let unavailable = ScraperManager.parsePost(unavailableRaw, platform: "x", previous: cached)!
+        precondition(unavailable.replyContext?.parent?.isUnavailable == true)
+        precondition(unavailable.replyContext?.parent?.id == "700" && unavailable.replyContext?.parent?.media.isEmpty == true)
+        precondition(!FeedReplyResolutionPolicy.needsResolution(unavailable))
+        let unknownUnavailable = ScraperManager.parsePost(unavailableRaw, platform: "x")!
+        precondition(unknownUnavailable.replyContext?.parent?.isUnavailable == true)
+        precondition(unknownUnavailable.replyContext?.parent?.id == nil)
+        // Reusing an image does not transfer ownership from the reply to the parent.
+        var sharedImage = cached
+        sharedImage.media = cached.replyContext!.parent!.media
+        let noMediaPass = ScraperManager.parsePost(["id": "701", "text": "Reply", "media": [], "replyContext": ["handles": ["parent_fixture"], "parent": rawParent]], platform: "x", previous: sharedImage)!
+        precondition(noMediaPass.media == sharedImage.media && noMediaPass.replyContext?.parent?.media == cached.replyContext?.parent?.media)
+        var posts = [unknown, parsed]
+        var detail = raw
+        detail["author"] = "Never replace the outer author"
+        detail["text"] = "Never replace the outer caption"
+        precondition(ScraperManager.applyResolvedReply(detail, postID: "701", to: &posts))
+        precondition(posts.count == 2 && posts[0].author == unknown.author && posts[0].text == unknown.text)
+        precondition(posts[0].replyContext?.parent?.id == "700" && posts[1] == parsed)
+        precondition(!ScraperManager.applyResolvedReply(detail, postID: "999", to: &posts))
+        var wrong = detail; wrong["id"] = "999"
+        precondition(!ScraperManager.applyResolvedReply(wrong, postID: "701", to: &posts))
+        var removed: [FeedPost] = []
+        precondition(!ScraperManager.applyResolvedReply(detail, postID: "701", to: &removed))
+        var different = raw
+        different["replyContext"] = ["handles": ["other"], "parent": ["id": "999", "text": "Other parent"]]
+        precondition(!ScraperManager.applyResolvedReply(different, postID: "701", to: &posts))
+        precondition(ScraperManager.applyResolvedReply(unavailableRaw, postID: "701", to: &posts))
+        precondition(posts[0].replyContext?.parent?.isUnavailable == true)
+        var parentPosts = [parsed]
+        precondition(ScraperManager.applyCachedPreview("parent-cache.jpg", for: parentKey, to: &parentPosts))
+        precondition(parentPosts[0].media[0].localPreviewFile == nil && parentPosts[0].replyContext?.parent?.media[0].localPreviewFile == "parent-cache.jpg")
+        var gone = [unavailable]
+        precondition(!ScraperManager.applyCachedPreview("late.jpg", for: parentKey, to: &gone))
+        precondition(gone[0].replyContext?.parent?.media.isEmpty == true)
+        var changed = parsed
+        changed.replyContext?.parent?.text = "Hydrated parent caption"
+        precondition(ScraperManager.readySignature(for: [changed]) != ScraperManager.readySignature(for: [parsed]))
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let candidates = (1...20).map { index in FeedPost(id: String(index), platform: "x", author: "Fixture", handle: "fixture", text: "Reply", timestamp: now, likes: 0, reposts: 0, comments: 0, replyContext: FeedReplyContext(handles: ["parent"])) }
+        precondition(FeedReplyResolutionPolicy.candidates(in: candidates, attemptedAt: [:], now: now) == ["1", "2", "3", "4", "5", "6"])
+        precondition(FeedReplyResolutionPolicy.candidates(in: [candidates[0], candidates[0], candidates[1]], attemptedAt: [:], now: now) == ["1", "2"])
+        precondition(FeedReplyResolutionPolicy.candidates(in: candidates, attemptedAt: ["1": now, "2": now.addingTimeInterval(-900)], now: now).first == "2")
+        precondition(FeedReplyResolutionPolicy.candidates(in: [parsed, unavailable], attemptedAt: [:], now: now).isEmpty)
+        var placeholder = parsed
+        placeholder.replyContext?.parent?.media = [FeedMedia(kind: "video")]
+        precondition(FeedReplyResolutionPolicy.needsResolution(placeholder))
+        precondition(!FeedReplyResolutionPolicy.acceptsParent(["id": "701"], targetID: "701"))
+        precondition(!FeedReplyResolutionPolicy.acceptsParent(["id": "invalid", "isUnavailable": true], targetID: "701"))
+        precondition(!FeedReplyResolutionPolicy.acceptsParent(["text": "Unverified neighbor"], targetID: "701"))
+        precondition(FeedReplyResolutionPolicy.acceptsParent(["isUnavailable": true], targetID: "701"))
+        precondition(!FeedReplyResolutionPolicy.shouldFinishReady(firstReadyAt: now, now: now.addingTimeInterval(6), stablePasses: 4, hasUsableMedia: false, isUnavailable: false))
+        precondition(!FeedReplyResolutionPolicy.shouldFinishReady(firstReadyAt: now, now: now.addingTimeInterval(6), stablePasses: 4, hasUsableMedia: true, isUnavailable: false))
+        precondition(FeedReplyResolutionPolicy.shouldFinishReady(firstReadyAt: now, now: now.addingTimeInterval(8), stablePasses: 2, hasUsableMedia: true, isUnavailable: false))
+        precondition(FeedReplyResolutionPolicy.shouldFinishReady(firstReadyAt: now, now: now.addingTimeInterval(15), stablePasses: 1, hasUsableMedia: false, isUnavailable: false))
+        precondition(FeedReplyResolutionPolicy.shouldFinishReady(firstReadyAt: now, now: now.addingTimeInterval(3), stablePasses: 2, hasUsableMedia: false, isUnavailable: true))
     }
 
     static func checkQuotedPosts() {

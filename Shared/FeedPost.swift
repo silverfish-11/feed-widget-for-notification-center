@@ -1,7 +1,7 @@
 import Foundation
 
-/// One quoted X post. Quotes are deliberately nonrecursive so attribution and
-/// attachments remain separate from the post that contains them.
+/// One referenced X post, used for a quote or a reply's parent. References are
+/// deliberately nonrecursive so each post keeps its own attribution and media.
 struct FeedQuotedPost: Codable, Hashable {
     var id: String?
     var author: String
@@ -41,6 +41,26 @@ struct FeedQuotedPost: Codable, Hashable {
     }
 }
 
+/// Reply recipients can be known before the parent post has loaded. Keep this
+/// relationship separate from a quote, which can appear in the same reply.
+struct FeedReplyContext: Codable, Hashable {
+    var handles: [String] = []
+    var parent: FeedQuotedPost? = nil
+
+    init(handles: [String] = [], parent: FeedQuotedPost? = nil) {
+        self.handles = handles
+        self.parent = parent
+    }
+
+    private enum CodingKeys: String, CodingKey { case handles, parent }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        handles = try values.decodeIfPresent([String].self, forKey: .handles) ?? []
+        parent = try values.decodeIfPresent(FeedQuotedPost.self, forKey: .parent)
+    }
+}
+
 struct FeedPost: Codable, Identifiable, Hashable {
     let id: String
     let platform: String
@@ -54,9 +74,11 @@ struct FeedPost: Codable, Identifiable, Hashable {
     var score: Double
     var media: [FeedMedia]
     var quotedPost: FeedQuotedPost?
+    var replyContext: FeedReplyContext?
 
     var allMedia: [FeedMedia] {
-        media + (quotedPost?.isUnavailable == false ? quotedPost?.media ?? [] : [])
+        media + (quotedPost?.isUnavailable == false ? quotedPost?.media ?? [] : []) +
+            (replyContext?.parent?.isUnavailable == false ? replyContext?.parent?.media ?? [] : [])
     }
 
     // Value equality includes content/media so existing UI rows update after hydration.
@@ -100,7 +122,7 @@ struct FeedPost: Codable, Identifiable, Hashable {
 
     init(id: String, platform: String, author: String, handle: String, text: String,
          timestamp: Date, likes: Int, reposts: Int, comments: Int, score: Double = 0, media: [FeedMedia] = [],
-         quotedPost: FeedQuotedPost? = nil) {
+         quotedPost: FeedQuotedPost? = nil, replyContext: FeedReplyContext? = nil) {
         self.id = id
         self.platform = platform
         self.author = author
@@ -113,10 +135,11 @@ struct FeedPost: Codable, Identifiable, Hashable {
         self.score = score
         self.media = media
         self.quotedPost = quotedPost
+        self.replyContext = replyContext
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, platform, author, handle, text, timestamp, likes, reposts, comments, score, media, quotedPost
+        case id, platform, author, handle, text, timestamp, likes, reposts, comments, score, media, quotedPost, replyContext
     }
 
     init(from decoder: Decoder) throws {
@@ -133,6 +156,7 @@ struct FeedPost: Codable, Identifiable, Hashable {
         score = try values.decodeIfPresent(Double.self, forKey: .score) ?? 0
         media = try values.decodeIfPresent([FeedMedia].self, forKey: .media) ?? []
         quotedPost = try values.decodeIfPresent(FeedQuotedPost.self, forKey: .quotedPost)
+        replyContext = try values.decodeIfPresent(FeedReplyContext.self, forKey: .replyContext)
     }
 }
 

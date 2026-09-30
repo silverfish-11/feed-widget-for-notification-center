@@ -4,6 +4,8 @@ A small native macOS Notification Center widget for your X and Instagram feeds. 
 
 Quoted X posts appear in a bordered card with their own author, text, and media preview. Select the quote to open that post, or the comment above it to open the outer post. Compact layouts shorten both captions to fit; Large media gives the quotation more space. Quotes are collected on the next successful refresh, and unavailable quotes show a placeholder.
 
+Replies show the original post above the response, with its author, text, and media, while any quoted post stays separate. Tap the parent to open it, or the response to open its thread. When X exposes only the recipients, FeedBar shows **Replying to @…** and looks up the parent after a successful refresh. Lookups use the existing local session, run one at a time, and are limited to six replies per refresh; failed lookups retain saved context and wait at least fifteen minutes before retrying. An explicitly unavailable parent shows a placeholder.
+
 WidgetKit provides snapshots and pagination, so the widget has no free scrolling or inline video playback. The collector refreshes every five minutes by default and retains the last successful feed when a source is unavailable. macOS controls when widget updates appear.
 
 ## Requirements

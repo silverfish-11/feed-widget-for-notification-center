@@ -16,7 +16,9 @@ enum JSScripts {
             videos: document.querySelectorAll('article video').length,
             attachments: posts.reduce((total, post) => total + (post.media || []).length, 0),
             quotes: posts.filter(post => post.quotedPost).length,
-            quoteAttachments: posts.reduce((total, post) => total + (post.quotedPost?.media || []).length, 0)
+            quoteAttachments: posts.reduce((total, post) => total + (post.quotedPost?.media || []).length, 0),
+            replies: posts.filter(post => post.replyContext).length,
+            replyAttachments: posts.reduce((total, post) => total + (post.replyContext?.parent?.media || []).length, 0)
         };
         return JSON.stringify({status, message, posts, emptyConfirmed, diagnostics, errorKind});
     };
@@ -143,18 +145,8 @@ enum JSScripts {
     }
     """#
 
-    static let xExtraction = "(function() {\n" + common + #"""
-    if (/\/(?:i\/flow\/login|login)(?:\/|$)/.test(path) ||
-        (/\/i\/jf\/onboarding\/web\/?$/.test(path) && new URLSearchParams(location.search).get('mode') === 'login') ||
-        hasVisible('input[autocomplete="username"], input[name="password"]'))
-        return result('loginRequired', 'Sign in to X to refresh your Following feed.');
-    const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
-    const following = tabs.find(tab => /^Following$/i.test(text(tab)));
-    if (!following) return result('loading', 'The X Following tab was not found; the site layout or language may have changed.');
-    if (following.getAttribute('aria-selected') !== 'true') {
-        following.click();
-        return result('loading', 'Switching X to Following…');
-    }
+    // Shared by the Following feed and the bounded reply-thread lookup.
+    static let xCommon = #"""
     const statusMatch = link => {
         try {
             const url = new URL(link.getAttribute('href'), location.href);
@@ -254,24 +246,34 @@ enum JSScripts {
             handle: unavailable ? '' : handle, text: unavailable ? '' : contentFor(contentRoot, exclusions, media, false),
             timestamp: !unavailable && time ? time.getAttribute('datetime') : null, media, isUnavailable: unavailable};
     };
-    const posts = [];
-    const seen = new Set();
-    // A quoted article belongs to its parent; it is not another timeline entry.
-    const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"], article'))
-        .filter(article => !article.parentElement?.closest('article'));
-    for (const article of articles) {
+    const replyContextFor = (article, exclusions = []) => {
+        // Only presentation metadata counts. Authored text, quote cards, user
+        // headers, buttons and ordinary @mentions cannot establish a reply.
+        const forbidden = '[data-testid="tweetText"], [data-testid="User-Name"], [data-testid="Tweet-User-Avatar"], button, [role="button"]';
+        const candidates = scopedNodes(article, 'div, span', exclusions).filter(node =>
+            !node.closest(forbidden) && !node.querySelector(forbidden) &&
+            /^Replying to\s*@/i.test(scopedText(node, exclusions)));
+        for (const node of candidates.reverse()) {
+            const label = scopedText(node, exclusions);
+            if (label.length > 280 || !/^Replying to\s*(?:@[A-Za-z0-9_]+\s*(?:(?:,|and|&)\s*)?)+(?:\d+\s+others?)?$/i.test(label)) continue;
+            const handles = [...new Set((label.match(/@[A-Za-z0-9_]+/g) || []).map(value => value.slice(1)))];
+            if (handles.length) return {handles};
+        }
+        return null;
+    };
+    const readPost = article => {
         const quotes = quoteRoots(article);
         // Use explicit outer ad markers, not words/markers inside a quote.
         if (scopedNodes(article, '[data-testid="placementTracking"]', quotes).length ||
-            scopedNodes(article, 'span', quotes).some(node => /^(Promoted|Sponsored|Ad)$/.test(scopedText(node, quotes)))) continue;
+            scopedNodes(article, 'span', quotes).some(node => /^(Promoted|Sponsored|Ad)$/.test(scopedText(node, quotes)))) return null;
         const {match, time} = identity(article, quotes);
-        if (!match || seen.has(match[2])) continue;
+        if (!match) return null;
         const handle = match[1];
         const author = nameFor(article, handle, quotes);
         const media = attachments(article, 'x', quotes);
         const content = contentFor(article, quotes, media, true);
         const quotedPost = quotes.length ? quotedPostFor(quotes[0]) : null;
-        if (!content && !media.length && !(quotedPost && (quotedPost.text || quotedPost.media.length || quotedPost.isUnavailable))) continue;
+        if (!content && !media.length && !(quotedPost && (quotedPost.text || quotedPost.media.length || quotedPost.isUnavailable))) return null;
         const metric = names => {
             for (const name of names) {
                 const node = scopedNodes(article, '[data-testid="' + name + '"]', quotes)[0];
@@ -279,17 +281,83 @@ enum JSScripts {
             }
             return 0;
         };
-        seen.add(match[2]);
-        posts.push({id: match[2], author, handle, text: content, media,
+        const replyContext = replyContextFor(article, quotes);
+        return {id: match[2], author, handle, text: content, media,
             timestamp: time ? time.getAttribute('datetime') : null,
             likes: metric(['like', 'unlike']), reposts: metric(['retweet', 'unretweet']), comments: metric(['reply']),
-            ...(quotedPost ? {quotedPost} : {})});
+            ...(quotedPost ? {quotedPost} : {}), ...(replyContext ? {replyContext} : {})};
+    };
+    """#
+
+    static let xExtraction = "(function() {\n" + common + xCommon + #"""
+    if (/\/(?:i\/flow\/login|login)(?:\/|$)/.test(path) ||
+        (/\/i\/jf\/onboarding\/web\/?$/.test(path) && new URLSearchParams(location.search).get('mode') === 'login') ||
+        hasVisible('input[autocomplete="username"], input[name="password"]'))
+        return result('loginRequired', 'Sign in to X to refresh your Following feed.');
+    const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+    const following = tabs.find(tab => /^Following$/i.test(text(tab)));
+    if (!following) return result('loading', 'The X Following tab was not found; the site layout or language may have changed.');
+    if (following.getAttribute('aria-selected') !== 'true') {
+        following.click();
+        return result('loading', 'Switching X to Following…');
+    }
+    const posts = [];
+    const seen = new Set();
+    const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"], article'))
+        .filter(article => !article.parentElement?.closest('article'));
+    for (const article of articles) {
+        const post = readPost(article);
+        if (!post || seen.has(post.id)) continue;
+        seen.add(post.id);
+        posts.push(post);
     }
     if (posts.length) return result('ready', '', posts);
     const empty = articles.length === 0 && /You aren.t following anyone yet|You.re not following anyone yet|Your timeline is empty/i.test(body);
     return empty ? result('ready', '', [], true) : result('loading', 'X loaded but no readable Following posts appeared.');
     })()
     """#
+
+    static func xReplyContextExtraction(for postID: String) -> String {
+        // The ID is interpolated into JavaScript only after a strict numeric gate.
+        let identifier = !postID.isEmpty && postID.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }) ? postID : ""
+        return "(function() {\n" + common + xCommon + "\nconst requestedID = '\(identifier)';\n" + #"""
+        const route = path.match(/^\/(?:[A-Za-z0-9_]+|i)\/status\/(\d+)(?:\/|$)/);
+        if (!requestedID || !route || route[1] !== requestedID)
+            return result('loading', 'Waiting for the requested reply thread.');
+        const primary = document.querySelector('[data-testid="primaryColumn"]') || document.querySelector('main');
+        if (!primary) return result('loading', 'Waiting for the reply thread.');
+        const articles = Array.from(primary.querySelectorAll('article')).filter(article => !article.parentElement?.closest('article'));
+        const target = articles.find(article => identity(article, quoteRoots(article)).match?.[2] === requestedID);
+        const post = target && readPost(target);
+        if (!post) return result('loading', 'Waiting for the requested reply.');
+        // On the exact permalink, X renders ancestors before the focal tweet in
+        // its Conversation timeline. Never borrow adjacent Following/recommended
+        // posts or cross a separator, ad, unrelated cell, or quote boundary.
+        const conversation = target.closest('[aria-label="Timeline: Conversation"]');
+        const cell = target.closest('[data-testid="cellInnerDiv"]');
+        if (!conversation || !cell || !conversation.contains(cell)) return result('ready', '', [post]);
+        const cells = Array.from(conversation.querySelectorAll('[data-testid="cellInnerDiv"]'))
+            .filter(node => node.closest('[aria-label="Timeline: Conversation"]') === conversation &&
+                !node.parentElement?.closest('[data-testid="cellInnerDiv"]'));
+        const index = cells.indexOf(cell);
+        const previous = index > 0 ? cells[index - 1] : null;
+        if (!previous || previous.querySelector('[role="heading"], [data-testid="placementTracking"]')) return result('ready', '', [post]);
+        const parents = Array.from(previous.querySelectorAll('article')).filter(article => !article.parentElement?.closest('article'));
+        if (parents.length === 1) {
+            const candidate = readPost(parents[0]);
+            const handles = post.replyContext?.handles || [];
+            if (candidate && candidate.id !== requestedID && (!handles.length || handles.some(handle => handle.toLowerCase() === candidate.handle.toLowerCase()))) {
+                post.replyContext = {handles: handles.length ? handles : [candidate.handle], parent: quotedPostFor(parents[0])};
+            } else if (!candidate && post.replyContext && isUnavailable(parents[0])) {
+                post.replyContext.parent = {id: null, author: '', handle: '', text: '', media: [], isUnavailable: true};
+            }
+        } else if (!parents.length && post.replyContext && isUnavailable(previous)) {
+            post.replyContext.parent = {id: null, author: '', handle: '', text: '', media: [], isUnavailable: true};
+        }
+        return result('ready', '', [post]);
+        })()
+        """#
+    }
 
     static let igExtraction = "(function() {\n" + common + #"""
     if (/\/accounts\/(?:login|onetap)/.test(path) || hasVisible('input[name="username"], input[name="password"]'))

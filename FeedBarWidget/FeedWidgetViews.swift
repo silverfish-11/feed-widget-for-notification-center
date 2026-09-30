@@ -181,7 +181,11 @@ struct FeedWidgetEntryView: View {
     private func postLink(_ post: FeedPost) -> some View {
         // A video poster opens its original post, where playback/authentication
         // belongs. The widget reads only locally cached preview images.
-        if let quote = post.quotedPost {
+        if let reply = post.replyContext {
+            GeometryReader { geometry in
+                replyPostRow(post, reply: reply, height: geometry.size.height)
+            }
+        } else if let quote = post.quotedPost {
             quotedPostRow(post, quote: quote)
         } else if let destination = post.url {
             Link(destination: destination) { postRow(post) }
@@ -191,6 +195,147 @@ struct FeedWidgetEntryView: View {
     }
 
     private var tightQuoteLayout: Bool { isCompact || denseRows }
+
+    private func replyPostRow(_ post: FeedPost, reply: FeedReplyContext, height: CGFloat) -> some View {
+        let compact = height < 110
+        let contextHeight: CGFloat = reply.parent == nil ? 12 : compact ? 25 : usesLargeMedia ? 58 : 36
+        let remaining = max(24, height - contextHeight - 3)
+        let responseHeight = post.quotedPost == nil ? remaining : compact ? min(26, remaining * 0.50) : min(42, remaining * 0.4)
+        let quoteHeight = max(18, remaining - responseHeight - 3)
+        return VStack(alignment: .leading, spacing: 3) {
+            if let destination = reply.parent?.url ?? post.url {
+                Link(destination: destination) { replyContextView(reply, height: contextHeight) }
+            } else {
+                replyContextView(reply, height: contextHeight)
+            }
+            if let destination = post.url {
+                Link(destination: destination) { replyResponse(post, height: responseHeight, compact: compact) }
+            } else {
+                replyResponse(post, height: responseHeight, compact: compact)
+            }
+            if let quote = post.quotedPost {
+                if let destination = quote.url {
+                    Link(destination: destination) { replyQuotation(quote, height: quoteHeight, compact: compact) }
+                } else {
+                    replyQuotation(quote, height: quoteHeight, compact: compact)
+                }
+            }
+        }
+        .frame(height: height, alignment: .topLeading)
+        .clipped()
+    }
+
+    private func replyContextView(_ reply: FeedReplyContext, height: CGFloat) -> some View {
+        let parent = reply.parent
+        let name = parent.map { $0.author.isEmpty ? ($0.handle.isEmpty ? "" : "@\($0.handle)") : $0.author } ?? ""
+        let target = name.isEmpty ? reply.handles.map { "@\($0)" }.joined(separator: ", ") : name
+        let media = parent.flatMap { $0.isUnavailable ? nil : featuredMedia($0.media) }
+        return HStack(alignment: .top, spacing: 4) {
+            VStack(alignment: .leading, spacing: 2) {
+                Label(target.isEmpty ? "Replying to a post" : "Replying to \(target)", systemImage: "arrow.turn.up.left")
+                    .font(.system(size: height < 30 ? 9 : max(9, FeedWidgetLayout.authorFontSize(preferences: preferences) - 1), weight: .medium))
+                    .lineLimit(1)
+                if let parent {
+                    Text(parent.isUnavailable ? "Original post unavailable" : parent.text.isEmpty ?
+                         (parent.media.isEmpty ? "Open original post" : "Media post") : parent.text)
+                        .font(.system(size: height < 30 ? 10 : max(10, bodyFontSize - 1)))
+                        .lineLimit(height > 46 ? 2 : 1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let media {
+                mediaPreview(media, count: parent?.media.count ?? 1)
+                    .frame(width: height > 46 ? 64 : 30, height: max(18, height - 2))
+            }
+        }
+        .padding(.leading, 5)
+        .frame(height: height, alignment: .topLeading)
+        .overlay(alignment: .leading) { Rectangle().fill(foreground.opacity(0.3)).frame(width: 1) }
+        .clipped()
+    }
+
+    private func replyResponse(_ post: FeedPost, height: CGFloat, compact: Bool) -> some View {
+        let media = featuredMedia(post)
+        return Group {
+            if usesLargeMedia, height > 140, let media {
+                VStack(alignment: .leading, spacing: 4) {
+                    authorLine(post)
+                    if !post.text.isEmpty { Text(post.text).font(.system(size: bodyFontSize)).lineLimit(2) }
+                    mediaPreview(media, count: post.media.count)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            } else {
+                HStack(alignment: .top, spacing: 4) {
+                    Group {
+                        if compact, post.quotedPost != nil {
+                            let fontSize: CGFloat = max(10, bodyFontSize - 2)
+                            let name = post.author.isEmpty ? "@\(post.handle)" : post.author
+                            let text = post.text.isEmpty ? (post.media.isEmpty ? "Open reply" : "Media reply") : post.text
+                            let lines = max(1, Int(height / (fontSize * 1.2)))
+                            if lines == 1 {
+                                GeometryReader { geometry in
+                                    HStack(alignment: .top, spacing: 3) {
+                                        Text(name).bold().lineLimit(1)
+                                            .frame(width: geometry.size.width * 0.36, alignment: .leading)
+                                        Text(text).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    .font(.system(size: fontSize))
+                                }
+                            } else {
+                                (Text(name).bold() + Text(": \(text)"))
+                                    .font(.system(size: fontSize)).lineLimit(lines)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        } else {
+                            VStack(alignment: .leading, spacing: 2) {
+                                authorLine(post)
+                                if !post.text.isEmpty {
+                                    Text(post.text).font(.system(size: bodyFontSize))
+                                        .lineLimit(max(1, Int((height - 18) / (bodyFontSize * 1.3))))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                } else if media == nil {
+                                    Text(post.media.isEmpty ? "Open reply" : "Media reply")
+                                        .font(.system(size: max(10, bodyFontSize - 1))).lineLimit(1)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if let media {
+                        mediaPreview(media, count: post.media.count)
+                            .frame(width: compact ? 30 : 64, height: max(18, min(height, 80)))
+                    }
+                }
+            }
+        }
+        .frame(height: height, alignment: .topLeading)
+        .clipped()
+    }
+
+    @ViewBuilder
+    private func replyQuotation(_ quote: FeedQuotedPost, height: CGFloat, compact: Bool) -> some View {
+        if compact {
+            let name = quote.author.isEmpty ? (quote.handle.isEmpty ? "Quoted post" : "@\(quote.handle)") : quote.author
+            let text = quote.isUnavailable ? "Quoted post unavailable" : quote.text
+            let media = quote.isUnavailable ? nil : featuredMedia(quote.media)
+            HStack(alignment: .top, spacing: 3) {
+                Image(systemName: "quote.opening").font(.system(size: 9))
+                (Text(name).bold() + Text(text.isEmpty ? "" : ": \(text)"))
+                    .font(.system(size: 10))
+                    .lineLimit(height > 29 ? 2 : 1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let media {
+                    mediaPreview(media, count: quote.media.count).frame(width: 22, height: max(12, height - 6))
+                }
+            }
+            .padding(3)
+            .frame(height: height, alignment: .topLeading)
+            .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(foreground.opacity(0.2)))
+            .clipped()
+        } else {
+            quoteCard(quote, parentHasMedia: false, heightOverride: height)
+        }
+    }
 
     private func quotedPostRow(_ post: FeedPost, quote: FeedQuotedPost) -> some View {
         VStack(alignment: .leading, spacing: tightQuoteLayout ? 3 : 4) {
@@ -234,12 +379,13 @@ struct FeedWidgetEntryView: View {
         }
     }
 
-    private func quoteCard(_ quote: FeedQuotedPost, parentHasMedia: Bool) -> some View {
+    private func quoteCard(_ quote: FeedQuotedPost, parentHasMedia: Bool, heightOverride: CGFloat? = nil) -> some View {
         let media = quote.isUnavailable ? nil : featuredMedia(quote.media)
         let prominent = usesLargeMedia && !isCompact
-        let height: CGFloat = tightQuoteLayout ? (entry.errorMessage == nil ? 42 : 36)
+        let defaultHeight: CGFloat = tightQuoteLayout ? (entry.errorMessage == nil ? 42 : 36)
             : prominent ? (parentHasMedia ? 154 : 178) - (entry.errorMessage == nil ? 0 : 12)
             : (entry.errorMessage == nil ? 70 : 62)
+        let height = heightOverride ?? defaultHeight
         let name = quote.author.isEmpty ? (quote.handle.isEmpty ? "Quoted post" : "@\(quote.handle)") : quote.author
         let caption = quote.isUnavailable ? "Quoted post unavailable" : quote.text
         let attribution = quote.author.isEmpty && quote.handle.isEmpty ? "Quoted post"

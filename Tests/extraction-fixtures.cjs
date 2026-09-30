@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const {JSDOM} = require('jsdom');
 const scripts = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 function extract(key, html, path = '/') {
-  const dom = new JSDOM(html, {url: `https://${key === 'x' ? 'x.com' : 'www.instagram.com'}${path}`, runScripts: 'outside-only'});
+  const dom = new JSDOM(html, {url: `https://${key.startsWith('x') ? 'x.com' : 'www.instagram.com'}${path}`, runScripts: 'outside-only'});
   dom.window.HTMLElement.prototype.getClientRects = function () {return this.hidden ? [] : [{width: 100, height: 20}];};
   return JSON.parse(dom.window.eval(scripts[key]));
 }
@@ -185,3 +185,48 @@ value = extract('x', following + '<article data-testid="tweet"><div data-testid=
 assert.equal(value.posts[0].author, 'Author After Avatar'); assert.equal(value.posts[0].quotedPost.author, 'Quoted Author');
 assert.deepEqual(value.posts[0].media, []); assert.deepEqual(value.posts[0].quotedPost.media, []);
 console.log('Extraction fixtures passed: normal X/Instagram, auth/errors, media/carousels, isolated quote identities/text/media/video, quote-only/unavailable/hydration, nested boundaries, ad/metric separation and inline-link false positives.');
+
+// Reply context is metadata outside the authored text and quote. Parent lookup
+// only uses the exact requested permalink's explicit Conversation timeline.
+const replyLabel = '<div>Replying to <a href="/tester">@tester</a> and <a href="/second">@second</a></div>';
+const reply = tweet('300', replyLabel + '<div data-testid="tweetText">My response</div>' + quote('950', '<div data-testid="tweetText">Separate quote</div>'));
+value = extract('x', following + reply);
+assert.deepEqual(value.posts[0].replyContext, {handles: ['tester', 'second']});
+assert.equal(value.posts[0].text, 'My response');
+assert.equal(value.posts[0].quotedPost.id, '950');
+for (const content of ['<div data-testid="tweetText">Replying to @tester</div>', '<button>Replying to @tester</button><div data-testid="tweetText">Body</div>', '<div data-testid="tweetText">Hello @tester</div>', '<div data-testid="tweetText">A post</div>' + quote('951', replyLabel + '<div data-testid="tweetText">Quoted reply</div>')]) {
+  assert.equal(extract('x', following + tweet('301', content)).posts[0].replyContext, undefined);
+}
+const cell = content => `<div data-testid="cellInnerDiv">${content}</div>`;
+const conversation = content => `<main><div data-testid="primaryColumn"><section aria-label="Timeline: Conversation">${content}</section></div></main>`;
+const parent = tweet('299', '<div data-testid="tweetText">Original parent</div><div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/reply-parent.jpg" alt="Parent image"></div>' + quote('949', '<div data-testid="tweetText">Parent’s own quote</div>' + quotedPhoto));
+value = extract('xReply', conversation(cell(parent) + cell(reply)), '/tester/status/300');
+assert.equal(value.status, 'ready'); assert.equal(value.posts.length, 1);
+assert.equal(value.posts[0].id, '300'); assert.equal(value.posts[0].text, 'My response');
+assert.equal(value.posts[0].replyContext.parent.id, '299');
+assert.equal(value.posts[0].replyContext.parent.text, 'Original parent');
+assert.equal(value.posts[0].replyContext.parent.media.length, 1);
+assert.match(value.posts[0].replyContext.parent.media[0].url, /reply-parent/);
+assert.equal(value.posts[0].quotedPost.id, '950'); assert.equal(value.posts[0].media.length, 0);
+assert.equal(value.diagnostics.replyAttachments, 1);
+// Adjacent Following rows, unrelated timeline sections and recipients never prove a parent.
+assert.equal(extract('x', following + parent + reply).posts[1].replyContext.parent, undefined);
+assert.equal(extract('xReply', `<main>${parent}${reply}</main>`, '/tester/status/300').posts[0].replyContext.parent, undefined);
+assert.equal(extract('xReply', conversation(cell(parent.replaceAll('/tester', '/stranger')) + cell(reply)), '/tester/status/300').posts[0].replyContext.parent, undefined);
+assert.equal(extract('xReply', conversation(cell(parent) + cell('<div role="heading">Discover more</div>') + cell(reply)), '/tester/status/300').posts[0].replyContext.parent, undefined);
+assert.equal(extract('xReply', conversation(cell(parent) + cell(reply)), '/tester/status/301').status, 'loading');
+assert.equal(extract('xReply', conversation(cell(parent) + cell(tweet('301', '<div data-testid="tweetText">Different reply</div>'))), '/tester/status/300').status, 'loading');
+value = extract('xReply', conversation(cell('<div data-testid="tweetUnavailable">This Post is unavailable.</div>') + cell(reply)), '/i/status/300');
+assert.equal(value.posts[0].replyContext.parent.isUnavailable, true);
+assert.equal(extract('xReply', conversation(cell('<div>Something went wrong</div>') + cell(reply)), '/tester/status/300').posts[0].replyContext.parent, undefined);
+assert.equal(extract('xReply', '<input name="password">', '/i/flow/login').status, 'loginRequired');
+assert.equal(extract('xReply', '<div>Rate limit exceeded</div>', '/tester/status/300').errorKind, 'rateLimited');
+// A no-label focal tweet still has ancestry when X explicitly presents it in the conversation.
+value = extract('xReply', conversation(cell(parent) + cell(tweet('300', '<div data-testid="tweetText">Self thread response</div>'))), '/tester/status/300');
+assert.equal(value.posts[0].replyContext.parent.id, '299');
+console.log('Reply extraction fixtures passed: recipient metadata, isolated parent/response/quote media, exact thread routing, guarded ancestry, unavailable parent and auth/error preservation.');
+
+value = extract('xReply', conversation(cell('<article><div data-testid="tweetUnavailable">This Post is unavailable.</div></article>') + cell(reply)), '/tester/status/300');
+assert.equal(value.posts[0].replyContext.parent.isUnavailable, true);
+value = extract('xReply', conversation(cell(tweet('298', '<div data-testid="tweetText">Older ancestor</div>')) + cell(parent) + cell(reply)), '/tester/status/300');
+assert.equal(value.posts[0].replyContext.parent.id, '299', 'Only the immediate parent is retained');

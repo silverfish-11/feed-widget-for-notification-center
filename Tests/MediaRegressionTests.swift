@@ -32,6 +32,87 @@ struct MediaRegressionTests {
         return data as Data
     }
 
+    static func checkReplyContext(post: FeedPost, quote: FeedQuotedPost, directory: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var oldQuotedPost = post
+        oldQuotedPost.quotedPost = quote
+        var legacy = try JSONSerialization.jsonObject(with: encoder.encode(oldQuotedPost)) as! [String: Any]
+        legacy.removeValue(forKey: "replyContext")
+        let oldCache = try decoder.decode(FeedPost.self, from: JSONSerialization.data(withJSONObject: legacy))
+        try expect(oldCache.replyContext == nil && oldCache == oldQuotedPost,
+                   "Existing caches without reply context must keep their own and quoted content unchanged")
+        legacy["replyContext"] = NSNull()
+        let explicitNull = try decoder.decode(FeedPost.self, from: JSONSerialization.data(withJSONObject: legacy))
+        try expect(explicitNull.replyContext == nil, "An explicit null reply context must remain absent")
+        for document in ["{}", "{\"handles\":null,\"parent\":null}"] {
+            let empty = try decoder.decode(FeedReplyContext.self, from: Data(document.utf8))
+            try expect(empty == FeedReplyContext(), "Partially hydrated reply context must use empty optional defaults")
+        }
+        let recipients = FeedReplyContext(handles: ["parent_fixture", "other_fixture"])
+        let recipientRoundTrip = try decoder.decode(FeedReplyContext.self, from: encoder.encode(recipients))
+        try expect(recipientRoundTrip == recipients && recipientRoundTrip.parent == nil,
+                   "Reply recipients must survive before the parent post is available")
+        let parentOnly = try decoder.decode(FeedReplyContext.self, from: Data("{\"parent\":{\"id\":\"789\"}}".utf8))
+        try expect(parentOnly == FeedReplyContext(parent: FeedQuotedPost(id: "789")),
+                   "A referenced parent must decode without requiring recipient handles")
+
+        let parentMedia = FeedMedia(kind: "image", url: "https://pbs.twimg.com/media/reply-parent-fixture.jpg",
+                                   altText: "Parent attachment")
+        let parent = FeedQuotedPost(id: "789", author: "Parent Author", handle: "parent_fixture",
+                                    text: "The earlier post", timestamp: post.timestamp.addingTimeInterval(-120),
+                                    media: [parentMedia])
+        var reply = oldQuotedPost
+        reply.replyContext = FeedReplyContext(handles: recipients.handles, parent: parent)
+        let roundTrip = try decoder.decode(FeedPost.self, from: encoder.encode(reply))
+        try expect(roundTrip == reply && roundTrip.replyContext?.parent == parent,
+                   "Reply handles, parent attribution, date, text and media must survive serialization")
+        try expect(roundTrip.quotedPost == quote && roundTrip.author == post.author && roundTrip.media == post.media,
+                   "A reply parent must not replace the current post or its separate quote")
+        try expect(reply.allMedia == post.media + quote.media + parent.media,
+                   "Media collection must include each available attachment group without merging attribution")
+        try expect(reply.replyContext?.parent?.url?.absoluteString == "https://x.com/i/status/789",
+                   "Opening the parent must use its own safe numeric permalink")
+        try expect(reply != oldQuotedPost && reply.stableIdentifier == oldQuotedPost.stableIdentifier,
+                   "Reply context hydration must update row content without changing its identity")
+        var cachedReply = reply
+        cachedReply.replyContext?.parent?.media[0].localPreviewFile = parentMedia.cacheKey + ".jpg"
+        try expect(cachedReply != reply && cachedReply.stableIdentifier == reply.stableIdentifier,
+                   "A downloaded parent preview must change equality while retaining the row identity")
+        try expect(cachedReply.quotedPost == reply.quotedPost && cachedReply.media == reply.media,
+                   "Caching parent media must leave own and quote media unchanged")
+        var changedRecipients = reply
+        changedRecipients.replyContext?.handles.append("new_recipient")
+        try expect(changedRecipients != reply && Set([reply, cachedReply, changedRecipients]).count == 3,
+                   "Hashable must account for reply metadata and parent media changes")
+
+        var unavailable = reply
+        unavailable.replyContext?.parent?.isUnavailable = true
+        try expect(unavailable.allMedia == post.media + quote.media,
+                   "An unavailable parent must exclude its stale media without hiding an available quote")
+        unavailable = reply
+        unavailable.quotedPost?.isUnavailable = true
+        try expect(unavailable.allMedia == post.media + parent.media,
+                   "An unavailable quote must not hide the independent reply parent media")
+        unavailable.replyContext?.parent?.isUnavailable = true
+        try expect(unavailable.allMedia == post.media, "Two unavailable references must preserve the current post's media")
+        let unavailableRoundTrip = try decoder.decode(FeedPost.self, from: encoder.encode(unavailable))
+        try expect(unavailableRoundTrip.replyContext?.parent?.isUnavailable == true,
+                   "An unavailable parent marker must survive caching")
+        for unsafeID in ["../789", "https://example.com", "789?other=1", "", "789/0"] {
+            let unsafe = FeedReplyContext(parent: FeedQuotedPost(id: unsafeID))
+            try expect(unsafe.parent?.url == nil, "A parent reference must reject unsafe permalink IDs")
+        }
+
+        var snapshot = FeedSnapshot()
+        snapshot.sources["x"] = FeedSourceState(posts: [reply], status: "ready", lastSuccess: post.timestamp)
+        try FeedStore.save(snapshot, directory: directory)
+        let loaded = try FeedStore.load(directory: directory)
+        try expect(loaded.posts == [reply], "Shared feed storage must round-trip reply and quote attribution together")
+    }
+
     static func main() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("FeedBarMediaTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -79,6 +160,7 @@ struct MediaRegressionTests {
             try expect(FeedQuotedPost(id: unsafeID).url == nil, "Non-numeric quote IDs must never become links")
         }
         try expect(FeedQuotedPost().url == nil, "A quote without an ID must not fabricate a permalink")
+        try checkReplyContext(post: post, quote: quote, directory: root)
         var withoutMedia = post
         withoutMedia.media = []
         try expect(withoutMedia != post, "Same-ID posts with newly hydrated media must compare unequal")
