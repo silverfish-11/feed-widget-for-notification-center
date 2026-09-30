@@ -10,15 +10,52 @@ struct FeedEntry: TimelineEntry {
     let pageSize: Int
     let snapshot: FeedSnapshot
     let errorMessage: String?
+    let preferences: WidgetPreferences
+
+    init(date: Date, posts: [FeedPost], page: Int, totalPages: Int, pageSize: Int,
+         snapshot: FeedSnapshot, errorMessage: String?, preferences: WidgetPreferences = .init()) {
+        self.date = date
+        self.posts = posts
+        self.page = page
+        self.totalPages = totalPages
+        self.pageSize = pageSize
+        self.snapshot = snapshot
+        self.errorMessage = errorMessage
+        self.preferences = preferences
+    }
 }
 
 enum FeedWidgetLayout {
-    static func pageSize(for family: WidgetFamily) -> Int {
+    static func pageSize(for family: WidgetFamily, preferences: WidgetPreferences = .init()) -> Int {
         switch family {
         case .systemSmall: return 1
         case .systemMedium: return 1
-        case .systemExtraLarge: return 4
-        default: return 2
+        case .systemExtraLarge: return preferences.density == .compact ? 6 : 4
+        default: return preferences.density == .compact && preferences.textSize != .large ? 3 : 2
+        }
+    }
+
+    static func bodyFontSize(for family: WidgetFamily, preferences: WidgetPreferences) -> CGFloat {
+        let base: CGFloat = family == .systemSmall || family == .systemMedium ? 11 : 12
+        return base + (preferences.textSize == .large ? 2 : preferences.textSize == .small ? -1 : 0)
+    }
+
+    static func authorFontSize(preferences: WidgetPreferences) -> CGFloat {
+        preferences.textSize == .large ? 13 : preferences.textSize == .small ? 10 : 11
+    }
+
+    static func textLines(for family: WidgetFamily, preferences: WidgetPreferences,
+                          hasMedia: Bool, hasError: Bool) -> Int {
+        switch family {
+        case .systemSmall:
+            return hasMedia ? 1 : (hasError ? 3 : 4)
+        case .systemMedium:
+            return hasError ? 2 : (hasMedia || preferences.textSize == .large ? 3 : 4)
+        default:
+            if preferences.density == .compact && pageSize(for: family, preferences: preferences) > 2 {
+                return preferences.textSize == .large ? 2 : 3
+            }
+            return preferences.textSize == .large ? 4 : 5
         }
     }
 }
@@ -57,7 +94,14 @@ struct FeedTimelineProvider: TimelineProvider {
     }
 
     private func makeEntry(family: WidgetFamily) -> FeedEntry {
-        let pageSize = FeedWidgetLayout.pageSize(for: family)
+        var preferences = WidgetPreferences()
+        var preferencesError: String?
+        do { preferences = try WidgetPreferences.load() }
+        catch {
+            preferencesError = "Preferences could not be read. Open Settings."
+            Self.logger.error("Widget preferences read failed: \(Self.safeErrorCode(error), privacy: .public)")
+        }
+        let pageSize = FeedWidgetLayout.pageSize(for: family, preferences: preferences)
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
         do {
             let snapshot = try FeedStore.load()
@@ -84,11 +128,12 @@ struct FeedTimelineProvider: TimelineProvider {
                              posts: FeedPagination.posts(allPosts, page: page, pageSize: pageSize),
                              page: page,
                              totalPages: FeedPagination.pageCount(totalPosts: allPosts.count, pageSize: pageSize),
-                             pageSize: pageSize, snapshot: snapshot, errorMessage: paginationError)
+                             pageSize: pageSize, snapshot: snapshot, errorMessage: paginationError ?? preferencesError,
+                             preferences: preferences)
         } catch {
             Self.logger.error("makeEntry build=\(build, privacy: .public) store read failed: \(Self.safeErrorCode(error), privacy: .public)")
             return FeedEntry(date: .now, posts: [], page: 0, totalPages: 1, pageSize: pageSize,
-                             snapshot: FeedSnapshot(), errorMessage: error.localizedDescription)
+                             snapshot: FeedSnapshot(), errorMessage: error.localizedDescription, preferences: preferences)
         }
     }
 }

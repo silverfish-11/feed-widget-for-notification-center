@@ -2,7 +2,7 @@
 
 A small native macOS Notification Center widget for your X and Instagram feeds. A menu bar app collects posts from signed-in WebKit sessions; the widget displays text, cached photos, video posters, and previous/next page controls. Open a post to view its full content on the original site.
 
-WidgetKit provides snapshots and pagination, so the widget has no free scrolling or inline video playback. The collector refreshes roughly every five minutes and retains the last successful feed when a source is unavailable. macOS controls when widget updates appear.
+WidgetKit provides snapshots and pagination, so the widget has no free scrolling or inline video playback. The collector refreshes every five minutes by default and retains the last successful feed when a source is unavailable. macOS controls when widget updates appear.
 
 ## Requirements
 
@@ -44,7 +44,17 @@ The script reports the resulting app path. Installation and launch are separate 
 2. Use its menu bar icon to open X and Instagram and sign in. Close each sign-in window when finished, then choose **Refresh Now**.
 3. Open Notification Center, choose **Edit Widgets**, and add **Feed** from FeedBar.
 
-FeedBar requests **Start at Login** on first launch to keep the collector available. Manage this from its menu or macOS Login Items settings. Keep the menu bar app running for fresh posts; the widget can display saved posts while it is closed.
+FeedBar requests **Start at Login** on first launch to keep the collector available. Manage this from Preferences or macOS Login Items settings. Keep the menu bar app running for fresh posts; the widget can display saved posts while it is closed.
+
+## Preferences
+
+Choose **Preferences…** from the FeedBar menu bar icon, or the widget’s settings button. Changes save automatically.
+
+- **General:** refresh manually or every 5, 10, 15, 30, or 60 minutes; manage Start at Login; refresh now.
+- **Appearance:** system, light, or dark grayscale UI; small, standard, or large text; comfortable or compact density; show or hide media previews; fit entire images or fill the preview area.
+- **Accounts:** check source status and open X or Instagram to sign in.
+
+Manual mode skips automatic startup, timed, and wake refreshes. Explicit refresh actions and finishing sign-in still collect posts. Changing the interval lets an active refresh finish. Widget preferences are shared locally with the extension; macOS controls when the refreshed appearance appears. Smaller widgets and larger text may limit the number of visible posts.
 
 ## Tests
 

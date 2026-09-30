@@ -25,6 +25,7 @@ trap 'rm -rf "$scratch"' EXIT
 
 xcrun swiftc "$project_root"/Shared/*.swift \
     "$project_root/FeedBarApp/JSScripts.swift" \
+    "$project_root/FeedBarApp/FeedSettings.swift" \
     "$project_root/FeedBarApp/ScraperManager.swift" \
     "$project_root/FeedBarApp/MediaPreviewDownloader.swift" \
     "$tests_root/ScraperRegression.swift" \

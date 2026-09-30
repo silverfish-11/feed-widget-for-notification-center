@@ -15,7 +15,7 @@ struct FeedBarMainWidget: Widget {
         StaticConfiguration(kind: kind, provider: FeedTimelineProvider()) { entry in
             FeedWidgetEntryView(entry: entry)
                 .containerBackground(for: .widget) {
-                    Color(white: 0.12)
+                    FeedWidgetBackground(preferences: entry.preferences)
                 }
         }
         .contentMarginsDisabled()

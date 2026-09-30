@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    MARKETING_VERSION: "2.5"
-    CURRENT_PROJECT_VERSION: "7"
+    MARKETING_VERSION: "2.6"
+    CURRENT_PROJECT_VERSION: "8"
     CODE_SIGN_STYLE: Manual
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_IDENTITY: "-"
@@ -25,6 +25,8 @@ targets:
     platform: macOS
     sources:
       - path: FeedBarApp/FeedBarApp.swift
+      - path: FeedBarApp/FeedSettings.swift
+      - path: FeedBarApp/SettingsWindowController.swift
       - path: FeedBarApp/ScraperManager.swift
       - path: FeedBarApp/MediaPreviewDownloader.swift
       - path: FeedBarApp/JSScripts.swift

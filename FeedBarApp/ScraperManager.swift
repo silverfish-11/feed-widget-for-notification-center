@@ -15,7 +15,10 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
     private var loginKey: String?
     private var authenticationWindows: [NSWindow] = []
     private var authenticationSources: [ObjectIdentifier: String] = [:]
-    private var scrapeTimer: Timer?
+    private let settings: FeedSettings
+    private lazy var refreshScheduler = FeedRefreshScheduler(settings: settings) { [weak self] in
+        self?.scrapeAll()
+    }
     private var timeoutWork: DispatchWorkItem?
     private var pollWork: DispatchWorkItem?
     private var pendingSources: [String] = []
@@ -49,7 +52,8 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
         var lastDiagnostics: String?
     }
 
-    override init() {
+    init(settings: FeedSettings = FeedSettings()) {
+        self.settings = settings
         do {
             snapshot = try FeedStore.load()
         } catch {
@@ -90,11 +94,14 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
     func startTimer() {
         dispatchPrecondition(condition: .onQueue(.main))
         stopped = false
-        scrapeTimer?.invalidate()
-        let timer = Timer(timeInterval: 5 * 60, repeats: true) { [weak self] _ in self?.scrapeAll() }
-        RunLoop.main.add(timer, forMode: .common)
-        scrapeTimer = timer
-        scrapeAll()
+        refreshScheduler.start()
+    }
+
+    /// Apply a new interval without disturbing an in-flight collection or
+    /// triggering an extra immediate refresh.
+    func rescheduleTimer() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        refreshScheduler.reschedule()
     }
 
     func stop() {
@@ -102,8 +109,7 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
         sourceGenerations.removeAll()
         mediaDownloader.cancel()
         mediaPublishWork?.cancel()
-        scrapeTimer?.invalidate()
-        scrapeTimer = nil
+        refreshScheduler.stop()
         timeoutWork?.cancel()
         pollWork?.cancel()
         active = nil

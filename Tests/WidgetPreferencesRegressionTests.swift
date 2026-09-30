@@ -1,0 +1,146 @@
+import Foundation
+import WidgetKit
+
+@main
+struct WidgetPreferencesRegressionTests {
+    struct Failure: Error { let message: String }
+    static var assertions = 0
+    static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        assertions += 1
+        if !condition() { throw Failure(message: message) }
+    }
+
+    static func main() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("FeedBarWidgetPreferences-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("widget-preferences.json")
+        let defaults = WidgetPreferences()
+        let initial = try WidgetPreferences.load(directory: root)
+        try expect(initial == defaults, "A missing preferences file must use the established widget defaults")
+        try expect(!FileManager.default.fileExists(atPath: file.path), "Reading defaults must not create runtime files")
+        let chosen = WidgetPreferences(appearance: .light, textSize: .large, density: .compact, showsMedia: false, imageFit: .fit)
+        try chosen.save(directory: root)
+        let restored = try WidgetPreferences.load(directory: root)
+        try expect(restored == chosen, "Every appearance preference must survive an atomic save/load")
+        let oldBytes = try Data(contentsOf: file)
+        let malformed = Data("{\"appearance\": broken JSON".utf8)
+        try malformed.write(to: file)
+        do {
+            _ = try WidgetPreferences.load(directory: root)
+            throw Failure(message: "Malformed preferences were silently replaced with defaults")
+        } catch is DecodingError { assertions += 1 }
+        try expect(tryData(file) == malformed, "A failed read must preserve corrupt bytes for review")
+        try chosen.save(directory: root)
+        let backups = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("widget-preferences.corrupt-") }
+        try expect(backups.count == 1 && tryData(backups[0]) == malformed,
+                   "An explicit repair must back up the original corrupt bytes before saving")
+        let repaired = try WidgetPreferences.load(directory: root)
+        try expect(repaired == chosen, "A preference change must recover after successfully preserving corruption")
+        try defaults.save(directory: root)
+        let afterValidSave = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("widget-preferences.corrupt-") }
+        try expect(afterValidSave == backups, "Ordinary valid saves must not create corruption backups")
+        try Data("[]".utf8).write(to: file)
+        do {
+            _ = try WidgetPreferences.load(directory: root)
+            throw Failure(message: "A non-object preferences document was accepted")
+        } catch is DecodingError { assertions += 1 }
+        try Data("{}".utf8).write(to: file)
+        let missingFields = try WidgetPreferences.load(directory: root)
+        try expect(missingFields == defaults, "Missing fields must retain compatibility with older preferences")
+        try Data("{\"appearance\":\"future-theme\",\"textSize\":null,\"density\":42,\"showsMedia\":\"unexpected\",\"imageFit\":\"future-mode\",\"futureOption\":true}".utf8).write(to: file)
+        let unknownFields = try WidgetPreferences.load(directory: root)
+        try expect(unknownFields == defaults, "Unknown or unsupported field values must fall back independently")
+        try Data("{\"appearance\":\"system\",\"showsMedia\":false}".utf8).write(to: file)
+        let partial = try WidgetPreferences.load(directory: root)
+        try expect(partial.appearance == .system && !partial.showsMedia && partial.textSize == .standard,
+                   "Valid fields must survive alongside absent fields")
+        try oldBytes.write(to: file)
+        let blocked = root.appendingPathComponent("not-a-directory")
+        try Data("retained".utf8).write(to: blocked)
+        do {
+            _ = try WidgetPreferences.load(directory: blocked)
+            throw Failure(message: "A storage failure was mistaken for missing settings")
+        } catch FeedStoreError.notDirectory { assertions += 1 }
+        do {
+            try defaults.save(directory: blocked)
+            throw Failure(message: "An impossible preferences write unexpectedly succeeded")
+        } catch is Failure { throw Failure(message: "Expected a filesystem error") }
+        catch { assertions += 1 }
+        try expect(tryData(blocked) == Data("retained".utf8), "Write failures must preserve the obstructing file")
+        try expect(tryData(file) == oldBytes, "Unrelated write failure must not touch saved preferences")
+
+        let unreadableRoot = root.appendingPathComponent("unreadable-file")
+        let directoryInsteadOfFile = unreadableRoot.appendingPathComponent("widget-preferences.json")
+        try FileManager.default.createDirectory(at: directoryInsteadOfFile, withIntermediateDirectories: true)
+        do {
+            try defaults.save(directory: unreadableRoot)
+            throw Failure(message: "An unreadable existing preferences path was overwritten")
+        } catch is Failure { throw Failure(message: "Expected an existing-document read error") }
+        catch { assertions += 1 }
+        var remainsDirectory: ObjCBool = false
+        try expect(FileManager.default.fileExists(atPath: directoryInsteadOfFile.path, isDirectory: &remainsDirectory) && remainsDirectory.boolValue,
+                   "An existing-document read failure must preserve its path")
+
+        let readOnlyRoot = root.appendingPathComponent("backup-write-failure")
+        try FileManager.default.createDirectory(at: readOnlyRoot, withIntermediateDirectories: true)
+        let readOnlyFile = readOnlyRoot.appendingPathComponent("widget-preferences.json")
+        try malformed.write(to: readOnlyFile)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: readOnlyRoot.path)
+        if !FileManager.default.isWritableFile(atPath: readOnlyRoot.path) {
+            do {
+                try defaults.save(directory: readOnlyRoot)
+                throw Failure(message: "Saving continued after a corruption backup could not be written")
+            } catch is Failure {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: readOnlyRoot.path)
+                throw Failure(message: "Expected a backup write failure")
+            } catch { assertions += 1 }
+            try expect(tryData(readOnlyFile) == malformed, "A backup write failure must leave corrupt original bytes untouched")
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: readOnlyRoot.path)
+
+        let families: [WidgetFamily] = [.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge]
+        for density in WidgetPreferences.Density.allCases {
+            for textSize in WidgetPreferences.TextSize.allCases {
+                for showsMedia in [true, false] {
+                    let preferences = WidgetPreferences(textSize: textSize, density: density, showsMedia: showsMedia)
+                    for family in families {
+                        let capacity = FeedWidgetLayout.pageSize(for: family, preferences: preferences)
+                        let expected: Int
+                        switch family {
+                        case .systemSmall, .systemMedium: expected = 1
+                        case .systemExtraLarge: expected = density == .compact ? 6 : 4
+                        default: expected = density == .compact && textSize != .large ? 3 : 2
+                        }
+                        try expect(capacity == expected, "Density/text-size capacity must keep every widget row within its family")
+                        try expect((1...6).contains(capacity), "Page capacity must stay within the intent's supported range")
+                        let lines = FeedWidgetLayout.textLines(for: family, preferences: preferences, hasMedia: showsMedia, hasError: false)
+                        try expect(lines >= 1 && lines <= 5, "Text must have a bounded layout in every size/density")
+                    }
+                }
+            }
+        }
+        for family in families {
+            let small = WidgetPreferences(textSize: .small)
+            let standard = WidgetPreferences()
+            let large = WidgetPreferences(textSize: .large)
+            try expect(FeedWidgetLayout.bodyFontSize(for: family, preferences: small) < FeedWidgetLayout.bodyFontSize(for: family, preferences: standard),
+                       "Small text must visibly reduce the body font")
+            try expect(FeedWidgetLayout.bodyFontSize(for: family, preferences: standard) < FeedWidgetLayout.bodyFontSize(for: family, preferences: large),
+                       "Large text must visibly enlarge the body font")
+            try expect(FeedWidgetLayout.authorFontSize(preferences: small) < FeedWidgetLayout.authorFontSize(preferences: large),
+                       "Text size must affect author names too")
+        }
+        let noMediaLines = FeedWidgetLayout.textLines(for: .systemSmall, preferences: defaults, hasMedia: false, hasError: false)
+        let mediaLines = FeedWidgetLayout.textLines(for: .systemSmall, preferences: defaults, hasMedia: true, hasError: false)
+        try expect(noMediaLines > mediaLines, "Hiding previews must return their space to post text")
+        let entry = FeedEntry(date: .now, posts: [], page: 0, totalPages: 1, pageSize: 1, snapshot: .init(), errorMessage: nil)
+        try expect(entry.preferences == defaults, "Existing entry fixtures must keep working without a preferences argument")
+        let customized = FeedEntry(date: .now, posts: [], page: 0, totalPages: 1, pageSize: 3, snapshot: .init(), errorMessage: nil, preferences: chosen)
+        try expect(customized.preferences == chosen, "Each entry must keep its own immutable preference snapshot")
+        print("Passed \(assertions) isolated widget preference persistence and layout checks.")
+    }
+
+    static func tryData(_ file: URL) -> Data? { try? Data(contentsOf: file) }
+}

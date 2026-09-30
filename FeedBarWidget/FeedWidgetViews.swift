@@ -1,14 +1,44 @@
 import SwiftUI
 import WidgetKit
 
+struct FeedWidgetPalette {
+    let isDark: Bool
+
+    init(preferences: WidgetPreferences, systemScheme: ColorScheme) {
+        isDark = preferences.appearance == .dark || (preferences.appearance == .system && systemScheme == .dark)
+    }
+
+    var foreground: Color { isDark ? .white : Color(white: 0.08) }
+    var background: Color { Color(white: isDark ? 0.12 : 0.95) }
+    var mediaBackground: Color { Color(white: isDark ? 0.19 : 0.86) }
+}
+
+struct FeedWidgetBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let preferences: WidgetPreferences
+    var body: some View { FeedWidgetPalette(preferences: preferences, systemScheme: colorScheme).background }
+}
+
 struct FeedWidgetEntryView: View {
     @Environment(\.widgetFamily) private var family
+    @Environment(\.colorScheme) private var colorScheme
     var entry: FeedEntry
     // Explicit local directory is only used by isolated previews and tests.
     var mediaDirectory: URL? = nil
 
     private var isSmall: Bool { family == .systemSmall }
     private var isCompact: Bool { family == .systemSmall || family == .systemMedium }
+    private var preferences: WidgetPreferences { entry.preferences }
+    private var palette: FeedWidgetPalette { .init(preferences: preferences, systemScheme: colorScheme) }
+    private var foreground: Color { palette.foreground }
+    private var denseRows: Bool { preferences.density == .compact && entry.pageSize > 2 }
+    private var rowSpacing: CGFloat { denseRows ? 6 : 8 }
+    private var bodyFontSize: CGFloat { FeedWidgetLayout.bodyFontSize(for: family, preferences: preferences) }
+    private var previewHeight: CGFloat {
+        if isSmall { return 55 - (preferences.textSize == .large ? 10 : 0) - (entry.errorMessage == nil ? 0 : 12) }
+        if isCompact { return entry.errorMessage == nil ? 80 : 68 }
+        return denseRows ? 68 : 108
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: isCompact ? 5 : 8) {
@@ -16,10 +46,9 @@ struct FeedWidgetEntryView: View {
             if entry.posts.isEmpty {
                 emptyState
             } else if family == .systemExtraLarge {
-                // Two rows, with two posts per row. Equal flexible heights keep
-                // media and pagination predictable at every supported size.
-                VStack(spacing: 8) {
-                    ForEach(0..<2, id: \.self) { row in
+                // Two columns; compact density adds a third row.
+                VStack(spacing: rowSpacing) {
+                    ForEach(0..<((entry.pageSize + 1) / 2), id: \.self) { row in
                         HStack(alignment: .top, spacing: 16) {
                             ForEach(Array(entry.posts.dropFirst(row * 2).prefix(2)), id: \.stableIdentifier) { post in
                                 postLink(post)
@@ -34,7 +63,7 @@ struct FeedWidgetEntryView: View {
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
             } else {
-                VStack(alignment: .leading, spacing: isCompact ? 0 : 8) {
+                VStack(alignment: .leading, spacing: isCompact ? 0 : rowSpacing) {
                     ForEach(entry.posts, id: \.stableIdentifier) { post in
                         postLink(post)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -44,7 +73,8 @@ struct FeedWidgetEntryView: View {
             }
             footer
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(foreground)
+        .tint(foreground)
         .multilineTextAlignment(.leading)
         .padding(isSmall ? 12 : 14)
     }
@@ -63,7 +93,7 @@ struct FeedWidgetEntryView: View {
                 .accessibilityLabel("Previous feed page")
                 Text("\(entry.page + 1)/\(entry.totalPages)")
                     .font(.system(size: 9).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.65))
+                    .foregroundStyle(foreground.opacity(0.65))
                 Button(intent: NextPageIntent(pageSize: entry.pageSize)) {
                     Image(systemName: "chevron.right")
                 }
@@ -75,6 +105,11 @@ struct FeedWidgetEntryView: View {
             }
             .fixedSize()
             .accessibilityLabel("Refresh feed")
+            if !isSmall {
+                Link(destination: URL(string: "feedbar://settings")!) { Image(systemName: "gearshape") }
+                    .fixedSize()
+                    .accessibilityLabel("Widget preferences")
+            }
         }
         .font(.system(size: 10, weight: .medium))
         .buttonStyle(.plain)
@@ -96,7 +131,7 @@ struct FeedWidgetEntryView: View {
                     .font(.system(size: 12, weight: .medium))
                 Text("Checking your connected sources.")
                     .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.65))
+                    .foregroundStyle(foreground.opacity(0.65))
                 Link("Retry refresh", destination: FeedBarConstants.refreshURL)
                     .font(.system(size: 11, weight: .medium))
             } else {
@@ -106,7 +141,7 @@ struct FeedWidgetEntryView: View {
                      ? "Sign in to load posts here."
                      : "Refresh to check your connected sources.")
                     .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.65))
+                    .foregroundStyle(foreground.opacity(0.65))
                 if sourceNeedsLogin("x") {
                     Link("Sign in to X", destination: URL(string: "feedbar://login/x")!)
                         .font(.system(size: 11, weight: .medium))
@@ -137,41 +172,44 @@ struct FeedWidgetEntryView: View {
 
     @ViewBuilder
     private func postRow(_ post: FeedPost) -> some View {
+        let media = featuredMedia(post)
+        let lines = FeedWidgetLayout.textLines(for: family, preferences: preferences,
+                                               hasMedia: media != nil, hasError: entry.errorMessage != nil)
         if isSmall {
             VStack(alignment: .leading, spacing: 4) {
                 authorLine(post)
-                if let media = featuredMedia(post) {
+                if let media {
                     mediaPreview(media, count: post.media.count)
                         .frame(maxWidth: .infinity)
-                        .frame(height: entry.errorMessage == nil ? 55 : 43)
+                        .frame(height: previewHeight)
                 }
                 if !post.text.isEmpty {
                     Text(post.text)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.88))
-                        .lineLimit(post.media.isEmpty ? 4 : 1)
+                        .font(.system(size: bodyFontSize))
+                        .foregroundStyle(foreground.opacity(0.88))
+                        .lineLimit(lines)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         } else {
             HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: denseRows ? 3 : 4) {
                     authorLine(post)
                     if !post.text.isEmpty {
                         Text(post.text)
-                            .font(.system(size: isCompact ? 11 : 12))
-                            .foregroundStyle(.white.opacity(0.88))
-                            .lineLimit(isCompact ? (entry.errorMessage == nil ? 3 : 2) : 5)
+                            .font(.system(size: bodyFontSize))
+                            .foregroundStyle(foreground.opacity(0.88))
+                            .lineLimit(lines)
                             .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     timestamp(post)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                if let media = featuredMedia(post) {
+                if let media {
                     mediaPreview(media, count: post.media.count)
-                        .frame(width: isCompact ? 112 : 110, height: isCompact ? (entry.errorMessage == nil ? 80 : 68) : 108)
+                        .frame(width: isCompact ? 112 : denseRows ? 82 : 110, height: previewHeight)
                 }
             }
         }
@@ -180,12 +218,12 @@ struct FeedWidgetEntryView: View {
     private func authorLine(_ post: FeedPost) -> some View {
         HStack(spacing: 4) {
             Text(post.author.isEmpty ? "@\(post.handle)" : post.author)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: FeedWidgetLayout.authorFontSize(preferences: preferences), weight: .semibold))
                 .lineLimit(1)
             Spacer(minLength: 2)
             Text(post.platformLabel)
                 .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.white.opacity(0.5))
+                .foregroundStyle(foreground.opacity(0.5))
         }
     }
 
@@ -198,21 +236,22 @@ struct FeedWidgetEntryView: View {
             }
         }
         .font(.system(size: 9))
-        .foregroundStyle(.white.opacity(0.45))
+        .foregroundStyle(foreground.opacity(0.55))
         .lineLimit(1)
     }
 
     private func featuredMedia(_ post: FeedPost) -> FeedMedia? {
-        post.media.first(where: { FeedMediaCache.imageURL(for: $0, directory: mediaDirectory) != nil }) ?? post.media.first
+        guard preferences.showsMedia else { return nil }
+        return post.media.first(where: { FeedMediaCache.imageURL(for: $0, directory: mediaDirectory) != nil }) ?? post.media.first
     }
 
     private func mediaPreview(_ media: FeedMedia, count: Int) -> some View {
         GeometryReader { geometry in
             ZStack {
-                Color(white: 0.19)
+                palette.mediaBackground
                 if let image = FeedMediaCache.image(for: media, directory: mediaDirectory) {
                     fullColorMediaImage(image)
-                        .aspectRatio(contentMode: .fill)
+                        .aspectRatio(contentMode: preferences.imageFit == .fit ? .fit : .fill)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipped()
                 } else {
@@ -225,7 +264,7 @@ struct FeedWidgetEntryView: View {
                                 .lineLimit(1)
                         }
                     }
-                    .foregroundStyle(.white.opacity(0.5))
+                    .foregroundStyle(foreground.opacity(0.6))
                 }
                 if media.isVideo {
                     Image(systemName: "play.fill")
@@ -242,6 +281,7 @@ struct FeedWidgetEntryView: View {
                         Text("\(count)")
                     }
                     .font(.system(size: 8, weight: .medium))
+                    .foregroundStyle(.white)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 3)
                     .background(.black.opacity(0.65), in: Capsule())
@@ -272,9 +312,9 @@ struct FeedWidgetEntryView: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 3) {
             if entry.errorMessage != nil, !entry.posts.isEmpty {
-                Text("Page unavailable. Try refreshing.")
+                Text("Open Settings or refresh to retry.")
                     .font(.system(size: 9))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(foreground.opacity(0.7))
                     .lineLimit(1)
             }
             HStack(spacing: 7) {
@@ -288,7 +328,7 @@ struct FeedWidgetEntryView: View {
                     Text("ago")
                 }
                 .font(.system(size: 9))
-                .foregroundStyle(.white.opacity(0.5))
+                .foregroundStyle(foreground.opacity(0.55))
                 .lineLimit(1)
             }
         }
@@ -311,7 +351,7 @@ struct FeedWidgetEntryView: View {
         return Link(destination: destination) {
             Text("\(label): \(status)")
                 .font(.system(size: 9))
-                .foregroundStyle(.white.opacity(source.status == "error" || source.status == "loginRequired" || stale ? 0.8 : 0.6))
+                .foregroundStyle(foreground.opacity(source.status == "error" || source.status == "loginRequired" || stale ? 0.8 : 0.6))
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }

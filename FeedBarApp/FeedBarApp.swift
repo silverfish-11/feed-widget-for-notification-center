@@ -1,10 +1,15 @@
 import Cocoa
 import ServiceManagement
+import WidgetKit
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private let scraper = ScraperManager()
+    private let settings = FeedSettings()
+    private lazy var scraper = ScraperManager(settings: settings)
+    private var preferences = WidgetPreferences()
+    private var preferencesNotice: String?
+    private var settingsWindow: SettingsWindowController?
     private var loginNotice: String?
     private var wakeObserver: NSObjectProtocol?
 
@@ -13,11 +18,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: "FeedBar")
         scraper.onUpdate = { [weak self] in self?.rebuildMenu() }
+        loadPreferences()
         configureLoginItem()
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self?.scraper.scrapeAll() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                guard let self, self.settings.automaticallyRefreshes else { return }
+                self.scraper.scrapeAll()
+            }
         }
         rebuildMenu()
         scraper.startTimer()
@@ -44,10 +53,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        let login = addItem("Start at Login", action: #selector(toggleLogin), to: menu)
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        addItem("Preferences…", action: #selector(showPreferences), to: menu, key: ",")
         addItem("Quit FeedBar", action: #selector(quit), to: menu, key: "q")
         statusItem.menu = menu
+        updatePreferencesWindow()
     }
     @discardableResult
     private func addItem(_ title: String, action: Selector, to menu: NSMenu, key: String = "") -> NSMenuItem {
@@ -61,12 +70,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func loginX() { login("x") }
     @objc private func loginIG() { login("ig") }
     @objc private func quit() { NSApp.terminate(nil) }
-    @objc private func toggleLogin() {
+    @objc private func showPreferences() {
+        if settingsWindow == nil {
+            let controller = SettingsWindowController()
+            controller.onRefreshMinutesChange = { [weak self] minutes in
+                guard let self else { return }
+                self.settings.refreshMinutes = minutes
+                self.scraper.rescheduleTimer()
+                self.updatePreferencesWindow()
+            }
+            controller.onPreferencesChange = { [weak self] value in self?.savePreferences(value) }
+            controller.onLaunchAtLoginChange = { [weak self] enabled in self?.setLaunchAtLogin(enabled) }
+            controller.onOpenSource = { [weak self] key in self?.login(key) }
+            controller.onRefresh = { [weak self] in self?.refresh() }
+            controller.onOpenLoginSettings = { SMAppService.openSystemSettingsLoginItems() }
+            controller.onActivation = { [weak self] in
+                self?.loadPreferences()
+                self?.updatePreferencesWindow()
+            }
+            settingsWindow = controller
+        }
+        loadPreferences()
+        updatePreferencesWindow()
+        settingsWindow?.present()
+    }
+
+    private func loadPreferences() {
         do {
-            if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
-            else { try SMAppService.mainApp.register() }
-            loginNotice = SMAppService.mainApp.status == .requiresApproval
-                ? "Allow FeedBar under System Settings → General → Login Items." : nil
+            preferences = try WidgetPreferences.load()
+            preferencesNotice = nil
+        } catch {
+            preferencesNotice = "Widget preferences could not be read. Your saved feed is unchanged."
+        }
+    }
+
+    private func savePreferences(_ value: WidgetPreferences) {
+        do {
+            try value.save()
+            preferences = value
+            preferencesNotice = nil
+            WidgetCenter.shared.reloadTimelines(ofKind: FeedBarConstants.widgetKind)
+        } catch {
+            preferencesNotice = "Preferences could not be saved. Please try again."
+        }
+        updatePreferencesWindow()
+    }
+
+    private func updatePreferencesWindow() {
+        guard let settingsWindow else { return }
+        let status = SMAppService.mainApp.status
+        let approvalNotice = status == .requiresApproval
+            ? "Allow FeedBar under System Settings → General → Login Items." : nil
+        let notice = [preferencesNotice, scraper.storageError, loginNotice, approvalNotice]
+            .compactMap { $0 }.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+            .joined(separator: "\n")
+        settingsWindow.update(refreshMinutes: settings.refreshMinutes, preferences: preferences,
+                              loginEnabled: status == .enabled || status == .requiresApproval,
+                              snapshot: scraper.snapshot, notice: notice.isEmpty ? nil : notice)
+    }
+
+    private func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            let status = SMAppService.mainApp.status
+            if enabled {
+                if status != .enabled && status != .requiresApproval { try SMAppService.mainApp.register() }
+            } else if status == .enabled || status == .requiresApproval {
+                try SMAppService.mainApp.unregister()
+            }
+            UserDefaults.standard.set(true, forKey: "feedbar_v2_login_configured")
+            loginNotice = nil
         } catch {
             loginNotice = "Could not update Start at Login: \(error.localizedDescription)"
         }
@@ -80,10 +152,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if SMAppService.mainApp.status == .notRegistered { try SMAppService.mainApp.register() }
             UserDefaults.standard.set(true, forKey: "feedbar_v2_login_configured")
             if SMAppService.mainApp.status == .requiresApproval {
-                loginNotice = "Allow FeedBar under System Settings → General → Login Items."
+                loginNotice = nil // Read pending approval from the live service status.
             }
         } catch {
-            loginNotice = "Start at Login could not be enabled. Use the FeedBar menu to retry."
+            loginNotice = "Start at Login could not be enabled. Open Preferences to retry."
         }
     }
     func applicationWillTerminate(_ notification: Notification) {
@@ -93,7 +165,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
             if url.scheme == "feedbar" {
-                if url.host == "login", let key = url.pathComponents.last, ["x", "ig"].contains(key) { login(key) }
+                if url.host == "settings" { showPreferences() }
+                else if url.host == "login", let key = url.pathComponents.last, ["x", "ig"].contains(key) { login(key) }
                 // Older widget timelines may still contain feedbar://open.
                 // Both routes refresh the background collector without a feed window.
                 else if url.host == "refresh" || url.host == "open" { refresh() }
