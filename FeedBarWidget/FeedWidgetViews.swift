@@ -181,11 +181,124 @@ struct FeedWidgetEntryView: View {
     private func postLink(_ post: FeedPost) -> some View {
         // A video poster opens its original post, where playback/authentication
         // belongs. The widget reads only locally cached preview images.
-        if let destination = post.url {
+        if let quote = post.quotedPost {
+            quotedPostRow(post, quote: quote)
+        } else if let destination = post.url {
             Link(destination: destination) { postRow(post) }
         } else {
             postRow(post)
         }
+    }
+
+    private var tightQuoteLayout: Bool { isCompact || denseRows }
+
+    private func quotedPostRow(_ post: FeedPost, quote: FeedQuotedPost) -> some View {
+        VStack(alignment: .leading, spacing: tightQuoteLayout ? 3 : 4) {
+            // These are sibling links: the author's comment opens the outer post,
+            // while the bordered quotation opens the quoted post itself.
+            if let destination = post.url {
+                Link(destination: destination) { quoteParent(post) }
+            } else {
+                quoteParent(post)
+            }
+            if let destination = quote.url {
+                Link(destination: destination) { quoteCard(quote, parentHasMedia: featuredMedia(post) != nil) }
+            } else {
+                quoteCard(quote, parentHasMedia: featuredMedia(post) != nil)
+            }
+            if usesLargeMedia && !isCompact {
+                timestamp(post)
+            }
+        }
+    }
+
+    private func quoteParent(_ post: FeedPost) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            VStack(alignment: .leading, spacing: 2) {
+                authorLine(post)
+                if !post.text.isEmpty {
+                    Text(post.text)
+                        .font(.system(size: bodyFontSize))
+                        .foregroundStyle(foreground.opacity(0.88))
+                        .lineLimit(tightQuoteLayout ? 1 : 2)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let media = featuredMedia(post) {
+                mediaPreview(media, count: post.media.count)
+                    .frame(width: tightQuoteLayout ? 34 : usesLargeMedia ? 80 : 56,
+                           height: tightQuoteLayout ? 28 : usesLargeMedia ? 58 : 42)
+            }
+        }
+    }
+
+    private func quoteCard(_ quote: FeedQuotedPost, parentHasMedia: Bool) -> some View {
+        let media = quote.isUnavailable ? nil : featuredMedia(quote.media)
+        let prominent = usesLargeMedia && !isCompact
+        let height: CGFloat = tightQuoteLayout ? (entry.errorMessage == nil ? 42 : 36)
+            : prominent ? (parentHasMedia ? 154 : 178) - (entry.errorMessage == nil ? 0 : 12)
+            : (entry.errorMessage == nil ? 70 : 62)
+        let name = quote.author.isEmpty ? (quote.handle.isEmpty ? "Quoted post" : "@\(quote.handle)") : quote.author
+        let caption = quote.isUnavailable ? "Quoted post unavailable" : quote.text
+        let attribution = quote.author.isEmpty && quote.handle.isEmpty ? "Quoted post"
+            : "Quoted post by \(name)\(quote.handle.isEmpty || name == "@" + quote.handle ? "" : ", @" + quote.handle)"
+        let mediaDescription = media.map { $0.isVideo ? "Video preview. Open quoted post to play." : ($0.altText.isEmpty ? "Photo." : $0.altText) } ?? ""
+        let fontSize = max(bodyFontSize - 1, 10)
+        return Group {
+            if prominent, let media {
+                VStack(alignment: .leading, spacing: 3) {
+                    quoteAuthor(name)
+                    if !caption.isEmpty {
+                        Text(caption)
+                            .font(.system(size: fontSize))
+                            .lineLimit(2)
+                    }
+                    mediaPreview(media, count: quote.media.count)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            } else {
+                HStack(alignment: .top, spacing: 5) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        quoteAuthor(name)
+                        if !caption.isEmpty {
+                            Text(caption)
+                                .font(.system(size: fontSize))
+                                .lineLimit(tightQuoteLayout ? 1 : prominent ? 7 : 3)
+                        } else if media == nil {
+                            Text("Open quoted post")
+                                .font(.system(size: fontSize))
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if let media {
+                        mediaPreview(media, count: quote.media.count)
+                            .frame(width: tightQuoteLayout ? 36 : 64,
+                                   height: height - 8)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(4)
+        .frame(height: height)
+        .background(foreground.opacity(0.035), in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(foreground.opacity(0.2), lineWidth: 1))
+        .foregroundStyle(foreground.opacity(0.85))
+        .multilineTextAlignment(.leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(attribution). \(caption) \(mediaDescription)")
+    }
+
+    private func quoteAuthor(_ name: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "quote.opening")
+            Text(name).lineLimit(1)
+        }
+        .font(.system(size: max(FeedWidgetLayout.authorFontSize(preferences: preferences) - 1, 9), weight: .semibold))
+        .foregroundStyle(foreground.opacity(0.65))
     }
 
     @ViewBuilder
@@ -276,8 +389,12 @@ struct FeedWidgetEntryView: View {
     }
 
     private func featuredMedia(_ post: FeedPost) -> FeedMedia? {
+        featuredMedia(post.media)
+    }
+
+    private func featuredMedia(_ media: [FeedMedia]) -> FeedMedia? {
         guard preferences.showsMedia else { return nil }
-        return post.media.first(where: { FeedMediaCache.imageURL(for: $0, directory: mediaDirectory) != nil }) ?? post.media.first
+        return media.first(where: { FeedMediaCache.imageURL(for: $0, directory: mediaDirectory) != nil }) ?? media.first
     }
 
     private func mediaPreview(_ media: FeedMedia, count: Int) -> some View {

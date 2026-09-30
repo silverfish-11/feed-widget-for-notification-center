@@ -118,7 +118,7 @@ struct FeedTimelineProvider: TimelineProvider {
                 let state = snapshot.sources[key]?.status ?? "idle"
                 return "\(key)=\(knownStatuses.contains(state) ? state : "unknown")"
             }.joined(separator: ",")
-            let attachments = allPosts.flatMap(\.media)
+            let attachments = allPosts.flatMap(\.allMedia)
             let cachedPreviews = attachments.filter { FeedMediaCache.imageURL(for: $0) != nil }.count
             Self.logger.notice("makeEntry build=\(build, privacy: .public) posts=\(allPosts.count) attachments=\(attachments.count) cachedPreviews=\(cachedPreviews) sources=\(states, privacy: .public)")
             var paginationError: String?

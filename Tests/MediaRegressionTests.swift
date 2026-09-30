@@ -47,9 +47,38 @@ struct MediaRegressionTests {
         decoder.dateDecodingStrategy = .iso8601
         var legacy = try JSONSerialization.jsonObject(with: encoder.encode(post)) as! [String: Any]
         legacy.removeValue(forKey: "media")
+        legacy.removeValue(forKey: "quotedPost")
         let legacyPost = try decoder.decode(FeedPost.self, from: JSONSerialization.data(withJSONObject: legacy))
         try expect(legacyPost.media.isEmpty, "Existing text-only feeds must decode without a media key")
         try expect(legacyPost.id == post.id && legacyPost.timestamp == date, "Legacy fields must remain unchanged")
+        try expect(legacyPost.quotedPost == nil, "Older snapshots without quotes must decode unchanged")
+        let quote = FeedQuotedPost(id: "456", author: "Quoted Author", handle: "quoted_fixture", text: "A separate quoted caption",
+                                   timestamp: date.addingTimeInterval(-60), media: [video])
+        var quoted = post
+        quoted.quotedPost = quote
+        let quoteRoundTrip = try decoder.decode(FeedPost.self, from: encoder.encode(quoted))
+        try expect(quoteRoundTrip == quoted && quoteRoundTrip.quotedPost == quote,
+                   "Quoted attribution, timestamp and media must survive snapshot serialization")
+        try expect(quoteRoundTrip.author == post.author && quoteRoundTrip.text == post.text && quoteRoundTrip.media == post.media,
+                   "Quoted content must never replace the outer post's attribution or attachments")
+        try expect(quoted != post && quoted.stableIdentifier == post.stableIdentifier,
+                   "A hydrated quote must update value equality while preserving the outer row identity")
+        var cachedQuote = quoted
+        cachedQuote.quotedPost?.media[0].localPreviewFile = video.cacheKey + ".jpg"
+        try expect(cachedQuote != quoted && cachedQuote.stableIdentifier == quoted.stableIdentifier,
+                   "An asynchronously cached quote preview must trigger a content update")
+        try expect(quoted.allMedia == post.media + quote.media,
+                   "Readiness and downloads must see both attachment groups without merging their attribution")
+        var unavailableQuote = quoted
+        unavailableQuote.quotedPost?.isUnavailable = true
+        try expect(unavailableQuote.allMedia == post.media, "An unavailable quote's stale attachments must not be downloaded")
+        let minimalQuote = try decoder.decode(FeedQuotedPost.self, from: Data("{\"id\":\"456\"}".utf8))
+        try expect(minimalQuote == FeedQuotedPost(id: "456"), "Partially hydrated quote metadata must decode with safe defaults")
+        try expect(quote.url?.absoluteString == "https://x.com/i/status/456", "A quote permalink must point to the quoted numeric ID")
+        for unsafeID in ["../456", "https://example.com", "456?other=1", "", "456/7", "fixture"] {
+            try expect(FeedQuotedPost(id: unsafeID).url == nil, "Non-numeric quote IDs must never become links")
+        }
+        try expect(FeedQuotedPost().url == nil, "A quote without an ID must not fabricate a permalink")
         var withoutMedia = post
         withoutMedia.media = []
         try expect(withoutMedia != post, "Same-ID posts with newly hydrated media must compare unequal")

@@ -1,5 +1,46 @@
 import Foundation
 
+/// One quoted X post. Quotes are deliberately nonrecursive so attribution and
+/// attachments remain separate from the post that contains them.
+struct FeedQuotedPost: Codable, Hashable {
+    var id: String?
+    var author: String
+    var handle: String
+    var text: String
+    var timestamp: Date?
+    var media: [FeedMedia]
+    var isUnavailable: Bool
+
+    init(id: String? = nil, author: String = "", handle: String = "", text: String = "",
+         timestamp: Date? = nil, media: [FeedMedia] = [], isUnavailable: Bool = false) {
+        self.id = id
+        self.author = author
+        self.handle = handle
+        self.text = text
+        self.timestamp = timestamp
+        self.media = media
+        self.isUnavailable = isUnavailable
+    }
+
+    var url: URL? {
+        guard let id, id.range(of: "^[0-9]+$", options: .regularExpression) != nil else { return nil }
+        return URL(string: "https://x.com/i/status/\(id)")
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, author, handle, text, timestamp, media, isUnavailable }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decodeIfPresent(String.self, forKey: .id)
+        author = try values.decodeIfPresent(String.self, forKey: .author) ?? ""
+        handle = try values.decodeIfPresent(String.self, forKey: .handle) ?? ""
+        text = try values.decodeIfPresent(String.self, forKey: .text) ?? ""
+        timestamp = try values.decodeIfPresent(Date.self, forKey: .timestamp)
+        media = try values.decodeIfPresent([FeedMedia].self, forKey: .media) ?? []
+        isUnavailable = try values.decodeIfPresent(Bool.self, forKey: .isUnavailable) ?? false
+    }
+}
+
 struct FeedPost: Codable, Identifiable, Hashable {
     let id: String
     let platform: String
@@ -12,6 +53,11 @@ struct FeedPost: Codable, Identifiable, Hashable {
     let comments: Int
     var score: Double
     var media: [FeedMedia]
+    var quotedPost: FeedQuotedPost?
+
+    var allMedia: [FeedMedia] {
+        media + (quotedPost?.isUnavailable == false ? quotedPost?.media ?? [] : [])
+    }
 
     // Value equality includes content/media so existing UI rows update after hydration.
     // Identity and deduplication use this explicit key instead.
@@ -53,7 +99,8 @@ struct FeedPost: Codable, Identifiable, Hashable {
     }
 
     init(id: String, platform: String, author: String, handle: String, text: String,
-         timestamp: Date, likes: Int, reposts: Int, comments: Int, score: Double = 0, media: [FeedMedia] = []) {
+         timestamp: Date, likes: Int, reposts: Int, comments: Int, score: Double = 0, media: [FeedMedia] = [],
+         quotedPost: FeedQuotedPost? = nil) {
         self.id = id
         self.platform = platform
         self.author = author
@@ -65,10 +112,11 @@ struct FeedPost: Codable, Identifiable, Hashable {
         self.comments = comments
         self.score = score
         self.media = media
+        self.quotedPost = quotedPost
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, platform, author, handle, text, timestamp, likes, reposts, comments, score, media
+        case id, platform, author, handle, text, timestamp, likes, reposts, comments, score, media, quotedPost
     }
 
     init(from decoder: Decoder) throws {
@@ -84,6 +132,7 @@ struct FeedPost: Codable, Identifiable, Hashable {
         comments = try values.decode(Int.self, forKey: .comments)
         score = try values.decodeIfPresent(Double.self, forKey: .score) ?? 0
         media = try values.decodeIfPresent([FeedMedia].self, forKey: .media) ?? []
+        quotedPost = try values.decodeIfPresent(FeedQuotedPost.self, forKey: .quotedPost)
     }
 }
 

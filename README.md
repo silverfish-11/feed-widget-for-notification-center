@@ -2,6 +2,8 @@
 
 A small native macOS Notification Center widget for your X and Instagram feeds. A menu bar app collects posts from signed-in WebKit sessions; the widget displays text, cached photos, video posters, and previous/next page controls. Open a post to view its full content on the original site.
 
+Quoted X posts appear in a bordered card with their own author, text, and media preview. Select the quote to open that post, or the comment above it to open the outer post. Compact layouts shorten both captions to fit; Large media gives the quotation more space. Quotes are collected on the next successful refresh, and unavailable quotes show a placeholder.
+
 WidgetKit provides snapshots and pagination, so the widget has no free scrolling or inline video playback. The collector refreshes every five minutes by default and retains the last successful feed when a source is unavailable. macOS controls when widget updates appear.
 
 ## Requirements

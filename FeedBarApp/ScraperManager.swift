@@ -209,7 +209,7 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
                 return
             }
             if let counts = payload["diagnostics"] as? [String: Any] {
-                let fields = ["articles", "images", "loadedImages", "videos", "attachments"].map { name in
+                let fields = ["articles", "images", "loadedImages", "videos", "attachments", "quotes", "quoteAttachments"].map { name in
                     "\(name)=\(max(0, min(100_000, counts[name] as? Int ?? 0)))"
                 }.joined(separator: " ")
                 if fields != self.active?.lastDiagnostics {
@@ -238,17 +238,7 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
                 }.sorted { $0.timestamp == $1.timestamp ? $0.id < $1.id : $0.timestamp > $1.timestamp }
                 // A selector failure must not erase the last good feed.
                 if !posts.isEmpty || (raw.isEmpty && payload["emptyConfirmed"] as? Bool == true) {
-                    var signature = Hasher()
-                    for post in posts {
-                        signature.combine(post.id)
-                        signature.combine(post.text) // Compare privately; never log post contents.
-                        for media in post.media {
-                            signature.combine(media.cacheKey)
-                            signature.combine(media.url)
-                            signature.combine(media.previewURL)
-                        }
-                    }
-                    let hash = signature.finalize()
+                    let hash = Self.readySignature(for: posts)
                     guard var settled = self.active, settled.id == id else { return }
                     settled.firstReadyAt = settled.firstReadyAt ?? Date()
                     settled.latestReadyPosts = posts
@@ -335,9 +325,10 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
         pollWork = nil
         // Successful DOM extraction is not the end of the page's media requests.
         if status != "ready" { webViews[attempt.key]?.stopLoading() }
-        let mediaCount = posts?.reduce(0) { $0 + $1.media.count } ?? 0
-        let previewCount = posts?.flatMap(\.media).filter { $0.previewRemoteURL != nil }.count ?? 0
-        logger.info("Refresh finished source=\(attempt.key, privacy: .public) status=\(status, privacy: .public) count=\(posts?.count ?? -1) attachments=\(mediaCount) previews=\(previewCount)")
+        let mediaCount = posts?.reduce(0) { $0 + $1.allMedia.count } ?? 0
+        let previewCount = posts?.flatMap(\.allMedia).filter { $0.previewRemoteURL != nil }.count ?? 0
+        let quoteCount = posts?.filter { $0.quotedPost != nil }.count ?? 0
+        logger.info("Refresh finished source=\(attempt.key, privacy: .public) status=\(status, privacy: .public) count=\(posts?.count ?? -1) quotes=\(quoteCount) attachments=\(mediaCount) previews=\(previewCount)")
         updateState(attempt.key) { state in
             state = Self.applyingResult(to: state, status: status, message: message, posts: posts)
         }
@@ -347,7 +338,10 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
 
     private func cacheMedia(in posts: [FeedPost], source: String, generation: UUID) {
         // Feed metadata is already saved. Image failures cannot stall that refresh.
-        let downloads = Array(posts.flatMap(\.media).filter { FeedMediaCache.imageURL(for: $0) == nil }.prefix(48))
+        var requested = Set<String>()
+        let downloads = Array(posts.flatMap(\.allMedia).filter {
+            FeedMediaCache.imageURL(for: $0) == nil && requested.insert($0.cacheKey).inserted
+        }.prefix(48))
         var remaining = downloads.count
         var completed = 0
         var changedSinceCheckpoint = false
@@ -357,12 +351,8 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
                 remaining -= 1
                 completed += 1
                 if let filename, var state = self.snapshot.sources[source] {
-                    for index in state.posts.indices {
-                        for attachment in state.posts[index].media.indices where state.posts[index].media[attachment].cacheKey == media.cacheKey {
-                            state.posts[index].media[attachment].localPreviewFile = filename
-                            changedSinceCheckpoint = true
-                        }
-                    }
+                    let changed = Self.applyCachedPreview(filename, for: media.cacheKey, to: &state.posts)
+                    changedSinceCheckpoint = changedSinceCheckpoint || changed
                     self.snapshot.sources[source] = state
                     self.onUpdate?() // Native UI may display each image as it arrives.
                 }
@@ -548,8 +538,46 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
     static func shouldFinishReady(firstReadyAt: Date, now: Date, stablePasses: Int, posts: [FeedPost]) -> Bool {
         let elapsed = now.timeIntervalSince(firstReadyAt)
         if elapsed >= 15 { return true }
-        let hasUsableMedia = posts.flatMap(\.media).contains { $0.previewRemoteURL != nil || $0.playbackURL != nil }
+        let hasUsableMedia = posts.flatMap(\.allMedia).contains { $0.previewRemoteURL != nil || $0.playbackURL != nil }
         return hasUsableMedia && elapsed >= 8 && stablePasses >= 2
+    }
+
+    static func readySignature(for posts: [FeedPost]) -> Int {
+        var signature = Hasher()
+        for post in posts {
+            signature.combine(post.id)
+            signature.combine(post.text) // Compare privately; never log post contents.
+            signature.combine(post.quotedPost)
+            for media in post.media {
+                signature.combine(media.cacheKey)
+                signature.combine(media.url)
+                signature.combine(media.previewURL)
+            }
+        }
+        return signature.finalize()
+    }
+
+    /// Patch only matching current attachments after the caller checks the source
+    /// generation. A removed/unavailable quote cannot be recreated by a callback.
+    @discardableResult
+    static func applyCachedPreview(_ filename: String, for cacheKey: String, to posts: inout [FeedPost]) -> Bool {
+        var changed = false
+        for index in posts.indices {
+            for attachment in posts[index].media.indices where posts[index].media[attachment].cacheKey == cacheKey {
+                guard posts[index].media[attachment].localPreviewFile != filename else { continue }
+                posts[index].media[attachment].localPreviewFile = filename
+                changed = true
+            }
+            if var quote = posts[index].quotedPost, !quote.isUnavailable {
+                for attachment in quote.media.indices where quote.media[attachment].cacheKey == cacheKey {
+                    guard quote.media[attachment].localPreviewFile != filename else { continue }
+                    quote.media[attachment].localPreviewFile = filename
+                    changed = true
+                }
+                posts[index].quotedPost = quote
+            }
+        }
+        return changed
     }
 
     /// A failed source only changes its status; its last successful content survives.
@@ -567,11 +595,41 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
 
     static func parsePost(_ dict: [String: Any], platform: String, previous: FeedPost? = nil) -> FeedPost? {
         guard let id = dict["id"] as? String,
-              id.range(of: platform == "x" ? "^[0-9]+$" : "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil,
-              let text = dict["text"] as? String else { return nil }
-        let previousMedia = Dictionary((previous?.media ?? []).map { ($0.cacheKey, $0) }, uniquingKeysWith: { a, _ in a })
+              id.range(of: platform == "x" ? "^[0-9]+$" : "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else { return nil }
+        let previous = previous?.id == id && previous?.platform == platform ? previous : nil
+        let text = dict["text"] as? String ?? ""
+        var quote = platform == "x" ? parseQuotedPost(dict["quotedPost"], previous: previous?.quotedPost) : nil
+        if var identified = quote, !identified.isUnavailable {
+            let legacyMedia = Dictionary((previous?.media ?? []).map { ($0.cacheKey, $0) }, uniquingKeysWith: { a, _ in a })
+            for index in identified.media.indices where identified.media[index].localPreviewFile == nil {
+                identified.media[index].localPreviewFile = legacyMedia[identified.media[index].cacheKey]?.localPreviewFile
+            }
+            quote = identified
+        }
+        let quoteKeys = Set((quote?.media ?? []).map(\.cacheKey) + (previous?.quotedPost?.media ?? []).map(\.cacheKey))
+        // Older collectors flattened quoted attachments into the outer post.
+        // Quote media can hydrate after its metadata, so remove inherited overlap
+        // on every pass. Explicit current parent attachments still win below.
+        let priorMedia = (previous?.media ?? []).filter { !quoteKeys.contains($0.cacheKey) }
+        let media = parseMedia(dict["media"], previous: priorMedia)
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !media.isEmpty || quote != nil else { return nil }
+        // No fabricated freshness: unknown dates stay unknown and sort to the end.
+        let newlyIdentifiedQuoteDate = quote?.timestamp != nil && previous?.quotedPost?.timestamp == nil
+        let priorDate = newlyIdentifiedQuoteDate && previous?.timestamp == quote?.timestamp ? nil : previous?.timestamp
+        let date = parseTimestamp(dict["timestamp"]) ?? priorDate ?? .distantPast
+        return FeedPost(id: id, platform: platform,
+                        author: dict["author"] as? String ?? "",
+                        handle: dict["handle"] as? String ?? "",
+                        text: text, timestamp: date,
+                        likes: max(0, dict["likes"] as? Int ?? 0),
+                        reposts: max(0, dict["reposts"] as? Int ?? 0),
+                        comments: max(0, dict["comments"] as? Int ?? 0), media: media, quotedPost: quote)
+    }
+
+    private static func parseMedia(_ raw: Any?, previous: [FeedMedia]) -> [FeedMedia] {
+        let previousMedia = Dictionary(previous.map { ($0.cacheKey, $0) }, uniquingKeysWith: { a, _ in a })
         var mediaKeys = Set<String>()
-        var media = (dict["media"] as? [[String: Any]] ?? []).prefix(12).compactMap { item -> FeedMedia? in
+        var media = (raw as? [[String: Any]] ?? []).prefix(12).compactMap { item -> FeedMedia? in
             guard let kind = item["kind"] as? String, kind == "image" || kind == "video" else { return nil }
             let url = FeedMedia.remoteURL(item["url"] as? String)?.absoluteString
             let preview = FeedMedia.remoteURL(item["previewURL"] as? String)?.absoluteString
@@ -584,34 +642,56 @@ final class ScraperManager: NSObject, WKNavigationDelegate, WKUIDelegate, NSWind
             attachment.localPreviewFile = previousMedia[attachment.cacheKey]?.localPreviewFile
             return attachment
         }
-        if let previous, !previous.media.isEmpty {
+        if !previous.isEmpty {
             let hasUsableMedia = media.contains { $0.previewRemoteURL != nil || $0.playbackURL != nil }
             if !hasUsableMedia {
                 // A hydration miss must not erase this post's last observed media.
-                media = previous.media
-            } else if media.count < previous.media.count,
-                      Set(media.map(\.cacheKey)).isSubset(of: Set(previous.media.map(\.cacheKey))) {
+                media = previous
+            } else if media.count < previous.count,
+                      Set(media.map(\.cacheKey)).isSubset(of: Set(previous.map(\.cacheKey))) {
                 let fresh = Dictionary(media.map { ($0.cacheKey, $0) }, uniquingKeysWith: { a, _ in a })
-                media = previous.media.map { fresh[$0.cacheKey] ?? $0 }
+                media = previous.map { fresh[$0.cacheKey] ?? $0 }
             }
         }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !media.isEmpty else { return nil }
+        return media
+    }
+
+    private static func parseQuotedPost(_ raw: Any?, previous: FeedQuotedPost?) -> FeedQuotedPost? {
+        guard let dict = raw as? [String: Any] else { return previous }
+        let id = (dict["id"] as? String).flatMap {
+            $0.range(of: "^[0-9]+$", options: .regularExpression) != nil ? $0 : nil
+        }
+        // Never borrow text, attribution or cached media from a different quote.
+        let sameQuote = (id != nil && previous?.id != nil && id != previous?.id) ? nil : previous
+        if dict["isUnavailable"] as? Bool == true {
+            return FeedQuotedPost(id: id ?? sameQuote?.id, isUnavailable: true)
+        }
+        let prior = sameQuote?.isUnavailable == false ? sameQuote : nil
+        func text(_ key: String, fallback: String = "") -> String {
+            let value = dict[key] as? String ?? ""
+            return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallback : value
+        }
+        let quote = FeedQuotedPost(id: id ?? sameQuote?.id,
+                                   author: text("author", fallback: prior?.author ?? ""),
+                                   handle: text("handle", fallback: prior?.handle ?? ""),
+                                   text: text("text", fallback: prior?.text ?? ""),
+                                   timestamp: parseTimestamp(dict["timestamp"]) ?? prior?.timestamp,
+                                   media: parseMedia(dict["media"], previous: prior?.media ?? []))
+        let hasContent = !quote.text.isEmpty || !quote.media.isEmpty || !quote.author.isEmpty || !quote.handle.isEmpty
+        // An empty hydration pass after an explicit tombstone must stay unavailable.
+        if !hasContent, sameQuote?.isUnavailable == true { return sameQuote }
+        return hasContent || quote.id != nil ? quote : nil
+    }
+
+    private static func parseTimestamp(_ raw: Any?) -> Date? {
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let raw = dict["timestamp"] as? String
+        let raw = raw as? String
         var timestamp = raw.flatMap { iso.date(from: $0) }
         if timestamp == nil {
             iso.formatOptions = [.withInternetDateTime]
             timestamp = raw.flatMap { iso.date(from: $0) }
         }
-        // No fabricated freshness: unknown dates stay unknown and sort to the end.
-        let date = timestamp ?? previous?.timestamp ?? .distantPast
-        return FeedPost(id: id, platform: platform,
-                        author: dict["author"] as? String ?? "",
-                        handle: dict["handle"] as? String ?? "",
-                        text: text, timestamp: date,
-                        likes: max(0, dict["likes"] as? Int ?? 0),
-                        reposts: max(0, dict["reposts"] as? Int ?? 0),
-                        comments: max(0, dict["comments"] as? Int ?? 0), media: media)
+        return timestamp
     }
 }

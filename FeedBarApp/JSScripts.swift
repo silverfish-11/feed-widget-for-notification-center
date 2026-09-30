@@ -14,7 +14,9 @@ enum JSScripts {
             images: images.length,
             loadedImages: images.filter(img => img.complete && img.naturalWidth > 0).length,
             videos: document.querySelectorAll('article video').length,
-            attachments: posts.reduce((total, post) => total + (post.media || []).length, 0)
+            attachments: posts.reduce((total, post) => total + (post.media || []).length, 0),
+            quotes: posts.filter(post => post.quotedPost).length,
+            quoteAttachments: posts.reduce((total, post) => total + (post.quotedPost?.media || []).length, 0)
         };
         return JSON.stringify({status, message, posts, emptyConfirmed, diagnostics, errorKind});
     };
@@ -33,7 +35,17 @@ enum JSScripts {
         (img.getAttribute('srcset') || '').split(',').map(value => value.trim().split(/\s+/))
             .sort((a, b) => parseFloat(b[1] || '0') - parseFloat(a[1] || '0'))
             .map(value => webURL(value[0])).find(Boolean) || null;
-    const attachments = (article, platform) => {
+    const outside = (node, exclusions) => !!node && !exclusions.some(root => root === node || root.contains(node));
+    const scopedNodes = (root, selector, exclusions = []) => Array.from(root.querySelectorAll(selector)).filter(node => outside(node, exclusions));
+    const scopedText = (root, exclusions = []) => {
+        if (!root) return '';
+        if (!exclusions.some(node => root.contains(node))) return text(root);
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        const parts = [];
+        while (walker.nextNode()) if (outside(walker.currentNode, exclusions)) parts.push(walker.currentNode.nodeValue);
+        return clean(parts.join(''));
+    };
+    const attachments = (article, platform, exclusions = []) => {
         const media = [];
         const keys = new Set();
         const videoPosterImages = new Set();
@@ -48,7 +60,7 @@ enum JSScripts {
             const dimensions = size(img);
             const imageLink = img.closest('a[href]');
             const profileImage = platform === 'ig' && imageLink && /^\/[A-Za-z0-9_.]+\/?$/.test(imageLink.getAttribute('href') || '');
-            return !profileImage && !!url && !img.closest('header, [data-testid="Tweet-User-Avatar"], a[href^="/stories/"]') &&
+            return outside(img, exclusions) && !profileImage && !!url && !img.closest('header, [data-testid="Tweet-User-Avatar"], a[href^="/stories/"]') &&
                 !/profile picture|profile photo|avatar/i.test(clean(img.alt)) && !/\/profile_images\//.test(url) &&
                 !(dimensions.width && dimensions.height && Math.max(dimensions.width, dimensions.height) < 96);
         };
@@ -59,8 +71,8 @@ enum JSScripts {
             // Instagram can put the poster beside a wrapper around the video,
             // several levels above its immediate parent. Never cross a slide/list.
             for (let container = video.parentElement; container && container !== article; container = container.parentElement) {
-                if (container.matches('ul, ol, [role="list"]') || container.querySelectorAll('video').length > 1) break;
-                const candidates = Array.from(container.querySelectorAll('img')).filter(img => {
+                if (container.matches('ul, ol, [role="list"]') || scopedNodes(container, 'video', exclusions).length > 1) break;
+                const candidates = scopedNodes(container, 'img', exclusions).filter(img => {
                     if (!isContentImage(img) || img.closest(slideSelector) !== slide) return false;
                     if (explicitPoster) {
                         const actual = new URL(imageURL(img));
@@ -82,7 +94,7 @@ enum JSScripts {
             return null;
         };
         // A blob: URL belongs to this WebView; exporting it cannot make it playable.
-        for (const video of article.querySelectorAll('video')) {
+        for (const video of scopedNodes(article, 'video', exclusions)) {
             const posterImage = findVideoPoster(video);
             if (posterImage) videoPosterImages.add(posterImage);
             const playback = webURL(video.currentSrc) || webURL(video.getAttribute('src')) ||
@@ -91,7 +103,7 @@ enum JSScripts {
             add({kind: 'video', url: playback, previewURL: preview, altText: clean(video.getAttribute('aria-label')) || (posterImage ? clean(posterImage.alt) : ''), ...size(video)}, video);
         }
         const selector = platform === 'x' ? '[data-testid="tweetPhoto"] img, [data-testid="videoPlayer"] img' : 'img';
-        for (const img of article.querySelectorAll(selector)) {
+        for (const img of scopedNodes(article, selector, exclusions)) {
             if (videoPosterImages.has(img)) continue;
             const alt = clean(img.alt);
             const url = imageURL(img);
@@ -143,41 +155,135 @@ enum JSScripts {
         following.click();
         return result('loading', 'Switching X to Following…');
     }
+    const statusMatch = link => {
+        try {
+            const url = new URL(link.getAttribute('href'), location.href);
+            if (!/^(?:www\.|mobile\.)?(?:x|twitter)\.com$/i.test(url.hostname)) return null;
+            return url.pathname.match(/^\/([A-Za-z0-9_]+)\/status\/(\d+)(?:\/|$)/);
+        } catch (_) { return null; }
+    };
+    const identity = (root, exclusions = []) => {
+        // Caption URLs are references, not the identity of the post containing them.
+        const links = scopedNodes(root, 'a[href*="/status/"]', exclusions)
+            .filter(link => !link.closest('[data-testid="tweetText"]') && statusMatch(link));
+        const permalink = links.find(link => scopedNodes(link, 'time', exclusions).length) || links[0];
+        return {match: permalink ? statusMatch(permalink) : null,
+            time: permalink ? scopedNodes(permalink, 'time', exclusions)[0] : null};
+    };
+    const profileLinks = (root, exclusions = []) => scopedNodes(root, 'a[href]', exclusions).filter(link => {
+        if (link.closest('[data-testid="tweetText"], [data-testid="Tweet-User-Avatar"]')) return false;
+        try {
+            const url = new URL(link.getAttribute('href'), location.href);
+            return /^(?:www\.|mobile\.)?(?:x|twitter)\.com$/i.test(url.hostname) && /^\/[A-Za-z0-9_]+\/?$/.test(url.pathname);
+        } catch (_) { return false; }
+    });
+    const nameFor = (root, handle, exclusions = []) => {
+        const names = scopedNodes(root, '[data-testid="User-Name"]', exclusions)[0];
+        const matches = link => new URL(link.href).pathname.replace(/\/$/, '') === '/' + handle && scopedText(link, exclusions);
+        // Empty avatar links can precede the actual author, including avatars
+        // with dynamic test IDs. Prefer a nonempty link in the name header.
+        const link = (names && profileLinks(names, exclusions).find(matches)) || profileLinks(root, exclusions).find(matches);
+        if (link) return scopedText(link, exclusions);
+        const label = names && scopedNodes(names, '[dir="auto"], span', exclusions).find(node => {
+            const value = scopedText(node, exclusions);
+            return !node.querySelector('span') && !node.closest('time, a[href*="/status/"]') && value &&
+                value !== handle && value !== '@' + handle && !/^(?:@|[·•]|\d+\s*[smhd]$)/i.test(value);
+        });
+        return scopedText(label, exclusions) || handle;
+    };
+    const unavailableText = value => /^(?:This (?:Post|Tweet) is unavailable|This (?:Post|Tweet) (?:was|has been) deleted(?: by (?:the (?:Post|Tweet) author|its author))?|This (?:Post|Tweet) is from (?:a suspended account|an account that no longer exists))[.!]?$/i.test(clean(value));
+    const isUnavailable = (root, exclusions = []) => {
+        if (scopedNodes(root, '[data-testid="tweetUnavailable"], [data-testid="tweetUnavailableText"]', exclusions).length) return true;
+        // The same words in an authored caption are legitimate content.
+        return !scopedNodes(root, '[data-testid="User-Name"], [data-testid="tweetPhoto"], video, [data-testid="videoPlayer"]', exclusions).length &&
+            !profileLinks(root, exclusions).length && unavailableText(scopedText(root, exclusions));
+    };
+    const quoteRoots = root => {
+        const candidates = scopedNodes(root, '[data-testid="quoteTweet"], article');
+        // X also uses a clickable card rather than a nested article. Require a
+        // post header and identity, or an explicit unavailable notice. A status
+        // URL by itself (especially inside tweetText) is never a quote card.
+        for (const card of scopedNodes(root, '[role="link"]').reverse()) {
+            if (card.closest('[data-testid="tweetText"], [data-testid="User-Name"], [data-testid="Tweet-User-Avatar"]')) continue;
+            const children = candidates.filter(node => card !== node && card.contains(node));
+            const own = identity(card, children);
+            const hasHeader = scopedNodes(card, '[data-testid="User-Name"]', children).length || profileLinks(card, children).length;
+            const hasTime = scopedNodes(card, 'time', children).length;
+            const hasContent = scopedNodes(card, '[data-testid="tweetText"], [data-testid="tweetPhoto"], video, [data-testid="videoPlayer"]', children).length;
+            // A role=link can also wrap an entire ordinary tweet. A quote card
+            // has some parent post structure outside it. JavaScript-only cards
+            // need no href when their own author, time and content identify them.
+            const outerExclusions = [...candidates, card];
+            const hasOuterPost = identity(root, outerExclusions).match ||
+                scopedNodes(root, '[data-testid="User-Name"], [data-testid="tweetText"]', outerExclusions).length;
+            if (hasOuterPost && ((hasHeader && (own.match || (hasTime && hasContent))) || isUnavailable(card, children))) candidates.push(card);
+        }
+        return candidates.filter((node, index) => candidates.indexOf(node) === index &&
+            !candidates.some(other => other !== node && other.contains(node)))
+            .sort((a, b) => a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+    };
+    const contentFor = (root, exclusions, media, includeMediaLabel) => {
+        const caption = scopedText(scopedNodes(root, '[data-testid="tweetText"]', exclusions)[0], exclusions);
+        const images = scopedNodes(root, '[data-testid="tweetPhoto"] img', exclusions);
+        const alts = images.map(img => clean(img.alt)).filter(alt => alt && !/^Image$/i.test(alt));
+        let content = media.length ? caption : [caption, ...alts.filter(alt => !caption.includes(alt))].filter(Boolean).join('\n');
+        if (!content && (!media.length || includeMediaLabel)) {
+            if (images.length) content = '[Image post]';
+            else if (scopedNodes(root, 'video, [data-testid="videoPlayer"]', exclusions).length) content = '[Video post]';
+        }
+        return content;
+    };
+    const quotedPostFor = card => {
+        // Explicit quote wrappers sometimes contain the quoted article itself.
+        // Unwrap only when the wrapper has no independent post metadata/content.
+        const nestedArticles = scopedNodes(card, 'article');
+        const own = identity(card, nestedArticles);
+        const contentRoot = nestedArticles.length && !own.match &&
+            !scopedNodes(card, '[data-testid="User-Name"], [data-testid="tweetText"], [data-testid="tweetPhoto"], video', nestedArticles).length ? nestedArticles[0] : card;
+        const exclusions = quoteRoots(contentRoot);
+        const {match, time: linkedTime} = identity(contentRoot, exclusions);
+        const time = linkedTime || scopedNodes(contentRoot, 'time', exclusions)[0];
+        const unavailable = isUnavailable(contentRoot, exclusions);
+        const profile = profileLinks(contentRoot, exclusions)[0];
+        const names = scopedNodes(contentRoot, '[data-testid="User-Name"]', exclusions)[0];
+        const handleLabel = names && scopedNodes(names, 'span, [dir="ltr"]', exclusions).map(node => scopedText(node, exclusions)).find(value => /^@[A-Za-z0-9_]+$/.test(value));
+        const visibleHandle = (handleLabel || scopedText(names, exclusions)).match(/(?:^|\s)@([A-Za-z0-9_]+)(?:\s|$)/);
+        const handle = match ? match[1] : profile ? new URL(profile.href).pathname.replace(/^\/|\/$/g, '') : visibleHandle ? visibleHandle[1] : '';
+        const media = unavailable ? [] : attachments(contentRoot, 'x', exclusions);
+        return {id: match ? match[2] : null, author: unavailable ? '' : nameFor(contentRoot, handle, exclusions),
+            handle: unavailable ? '' : handle, text: unavailable ? '' : contentFor(contentRoot, exclusions, media, false),
+            timestamp: !unavailable && time ? time.getAttribute('datetime') : null, media, isUnavailable: unavailable};
+    };
     const posts = [];
     const seen = new Set();
-    const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"], article'));
+    // A quoted article belongs to its parent; it is not another timeline entry.
+    const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"], article'))
+        .filter(article => !article.parentElement?.closest('article'));
     for (const article of articles) {
-        // Use explicit ad markers, not words that might appear in someone's post.
-        if (article.querySelector('[data-testid="placementTracking"]') ||
-            Array.from(article.querySelectorAll('span')).some(node => /^(Promoted|Sponsored|Ad)$/.test(text(node)))) continue;
-        const time = article.querySelector('time');
-        const permalink = (time && time.closest('a[href*="/status/"]')) || article.querySelector('a[href*="/status/"]');
-        const match = permalink && (permalink.getAttribute('href') || '').match(/\/([A-Za-z0-9_]+)\/status\/(\d+)(?:[/?#]|$)/);
+        const quotes = quoteRoots(article);
+        // Use explicit outer ad markers, not words/markers inside a quote.
+        if (scopedNodes(article, '[data-testid="placementTracking"]', quotes).length ||
+            scopedNodes(article, 'span', quotes).some(node => /^(Promoted|Sponsored|Ad)$/.test(scopedText(node, quotes)))) continue;
+        const {match, time} = identity(article, quotes);
         if (!match || seen.has(match[2])) continue;
         const handle = match[1];
-        const names = article.querySelector('[data-testid="User-Name"]');
-        const nameLink = names && Array.from(names.querySelectorAll('a')).find(link => {
-            try { return new URL(link.href, location.href).pathname.replace(/\/$/, '') === '/' + handle; } catch (_) { return false; }
-        });
-        const author = text(nameLink) || handle;
-        const caption = text(article.querySelector('[data-testid="tweetText"]'));
-        const media = attachments(article, 'x');
-        const imageAlts = Array.from(article.querySelectorAll('[data-testid="tweetPhoto"] img')).map(img => clean(img.alt)).filter(alt => alt && !/^Image$/i.test(alt));
-        let content = media.length ? caption : [caption, ...imageAlts.filter(alt => !caption.includes(alt))].filter(Boolean).join('\n');
-        if (!content && article.querySelector('[data-testid="tweetPhoto"] img')) content = '[Image post]';
-        if (!content && article.querySelector('video, [data-testid="videoPlayer"]')) content = '[Video post]';
-        if (!content && !media.length) continue;
+        const author = nameFor(article, handle, quotes);
+        const media = attachments(article, 'x', quotes);
+        const content = contentFor(article, quotes, media, true);
+        const quotedPost = quotes.length ? quotedPostFor(quotes[0]) : null;
+        if (!content && !media.length && !(quotedPost && (quotedPost.text || quotedPost.media.length || quotedPost.isUnavailable))) continue;
         const metric = names => {
             for (const name of names) {
-                const node = article.querySelector('[data-testid="' + name + '"]');
-                if (node) return count(node.getAttribute('aria-label') || text(node));
+                const node = scopedNodes(article, '[data-testid="' + name + '"]', quotes)[0];
+                if (node) return count(node.getAttribute('aria-label') || scopedText(node, quotes));
             }
             return 0;
         };
         seen.add(match[2]);
         posts.push({id: match[2], author, handle, text: content, media,
             timestamp: time ? time.getAttribute('datetime') : null,
-            likes: metric(['like', 'unlike']), reposts: metric(['retweet', 'unretweet']), comments: metric(['reply'])});
+            likes: metric(['like', 'unlike']), reposts: metric(['retweet', 'unretweet']), comments: metric(['reply']),
+            ...(quotedPost ? {quotedPost} : {})});
     }
     if (posts.length) return result('ready', '', posts);
     const empty = articles.length === 0 && /You aren.t following anyone yet|You.re not following anyone yet|Your timeline is empty/i.test(body);

@@ -76,8 +76,105 @@ struct ScraperRegression {
         precondition(ScraperManager.availableSources(["x", "ig"], loginKey: "ig", popupSources: ["x"]).isEmpty)
         precondition(ScraperManager.availableSources(["x", "ig"], loginKey: nil, popupSources: ["x", "x"]) == ["ig"])
         precondition(ScraperManager.availableSources(["x", "ig"], loginKey: nil, popupSources: []).count == 2)
+        checkQuotedPosts()
         checkDownloader()
-        print("Scraper regression checks passed: failure retention, source isolation, confirmed-empty clearing, ISO dates, stable IDs, cached-media retention, bounded cookie-free preview downloads, deferred-media settling, bounded transient recovery, source-owned auth lifecycle.")
+        print("Scraper regression checks passed: failure retention, source isolation, confirmed-empty clearing, ISO dates, stable IDs, quoted attribution/hydration and targeted caching, cached-media retention, bounded cookie-free preview downloads, deferred-media settling, bounded transient recovery, source-owned auth lifecycle.")
+    }
+
+    static func checkQuotedPosts() {
+        let quoteURL = "https://pbs.twimg.com/media/quoted.jpg?signature=old"
+        let outerURL = "https://pbs.twimg.com/media/outer.jpg"
+        let rawQuote: [String: Any] = ["id": "456", "author": "Quoted Author", "handle": "quoted_fixture",
+                                      "text": "Quoted words", "timestamp": "2026-03-05T09:00:00.000Z",
+                                      "media": [["kind": "image", "url": quoteURL]]]
+        let raw: [String: Any] = ["id": "123", "author": "Outer Author", "handle": "outer_fixture", "text": "Outer words",
+                                 "media": [["kind": "image", "url": outerURL]], "quotedPost": rawQuote]
+        let parsed = ScraperManager.parsePost(raw, platform: "x")!
+        precondition(parsed.author == "Outer Author" && parsed.handle == "outer_fixture" && parsed.text == "Outer words")
+        precondition(parsed.media.count == 1 && parsed.media[0].url == outerURL)
+        precondition(parsed.quotedPost?.id == "456" && parsed.quotedPost?.author == "Quoted Author" &&
+                     parsed.quotedPost?.handle == "quoted_fixture" && parsed.quotedPost?.text == "Quoted words")
+        precondition(parsed.quotedPost?.timestamp != nil && parsed.quotedPost?.media.first?.url == quoteURL)
+        precondition(parsed.allMedia.count == 2)
+        let quoteOnly = ScraperManager.parsePost(["id": "123", "quotedPost": rawQuote], platform: "x")!
+        precondition(quoteOnly.text.isEmpty && quoteOnly.media.isEmpty && quoteOnly.quotedPost?.text == "Quoted words")
+        var legacyFlattened = FeedPost(id: "123", platform: "x", author: "Quoted Author", handle: "quoted_fixture",
+                                       text: "Quoted words", timestamp: quoteOnly.quotedPost!.timestamp!,
+                                       likes: 0, reposts: 0, comments: 0, media: quoteOnly.quotedPost!.media)
+        let legacyFilename = legacyFlattened.media[0].cacheKey + ".jpg"
+        legacyFlattened.media[0].localPreviewFile = legacyFilename
+        let migrated = ScraperManager.parsePost(["id": "123", "author": "Outer Author", "handle": "outer_fixture",
+                                                 "text": "", "media": [], "quotedPost": rawQuote],
+                                                platform: "x", previous: legacyFlattened)!
+        precondition(migrated.text.isEmpty && migrated.author == "Outer Author" && migrated.media.isEmpty && migrated.timestamp == .distantPast,
+                     "An old flattened quote must not survive as duplicated outer caption, attribution, date or media")
+        precondition(migrated.quotedPost?.text == "Quoted words" && migrated.quotedPost?.media.count == 1)
+        precondition(migrated.quotedPost?.media[0].localPreviewFile == legacyFilename)
+        var sparseQuote = rawQuote
+        sparseQuote["media"] = []
+        sparseQuote.removeValue(forKey: "timestamp")
+        let firstMigrationPass = ScraperManager.parsePost(["id": "123", "text": "", "media": [], "quotedPost": sparseQuote],
+                                                         platform: "x", previous: legacyFlattened)!
+        let secondMigrationPass = ScraperManager.parsePost(["id": "123", "text": "", "media": [], "quotedPost": rawQuote],
+                                                          platform: "x", previous: firstMigrationPass)!
+        precondition(secondMigrationPass.media.isEmpty && secondMigrationPass.quotedPost?.media[0].localPreviewFile == legacyFilename &&
+                     secondMigrationPass.timestamp == .distantPast,
+                     "Deferred quote images must move out of legacy parent fallback while retaining their cached preview")
+        let explicitDate = ScraperManager.parsePost(["id": "123", "text": "", "timestamp": "2026-03-05T10:00:00Z", "quotedPost": rawQuote],
+                                                   platform: "x", previous: firstMigrationPass)!
+        precondition(explicitDate.timestamp > legacyFlattened.timestamp, "A fresh outer timestamp must win over migration fallback")
+        let explicitParent = ScraperManager.parsePost(["id": "123", "text": "", "media": [["kind": "image", "url": quoteURL]],
+                                                       "quotedPost": rawQuote], platform: "x", previous: firstMigrationPass)!
+        precondition(explicitParent.media.count == 1 && explicitParent.quotedPost?.media.count == 1,
+                     "An explicitly observed parent attachment must survive even when its image also appears in the quote")
+        precondition(ScraperManager.parsePost(["id": "123", "quotedPost": ["media": [["kind": "image", "url": quoteURL]]]], platform: "x")?.quotedPost?.media.count == 1)
+        precondition(ScraperManager.parsePost(["id": "123", "quotedPost": ["isUnavailable": true]], platform: "x")?.quotedPost?.isUnavailable == true)
+        precondition(ScraperManager.parsePost(["id": "123", "quotedPost": [:]], platform: "x") == nil)
+        precondition(ScraperManager.parsePost(["id": "123", "quotedPost": rawQuote], platform: "ig") == nil)
+        var cached = parsed
+        let quoteFilename = cached.quotedPost!.media[0].cacheKey + ".jpg"
+        cached.quotedPost?.media[0].localPreviewFile = quoteFilename
+        cached.quotedPost?.media.append(FeedMedia(kind: "image", url: "https://pbs.twimg.com/media/quoted-slide2.jpg"))
+        var renewedQuote = rawQuote
+        renewedQuote["media"] = [["kind": "image", "url": "https://pbs.twimg.com/media/quoted.jpg?signature=new"]]
+        let renewed = ScraperManager.parsePost(["id": "123", "quotedPost": renewedQuote], platform: "x", previous: cached)!
+        precondition(renewed.quotedPost?.media.count == 2 && renewed.quotedPost?.media[0].localPreviewFile == cached.quotedPost?.media[0].localPreviewFile)
+        precondition(renewed.quotedPost?.media[0].url?.hasSuffix("signature=new") == true)
+        let missing = ScraperManager.parsePost(["id": "123", "text": "Outer updated", "quotedPost": NSNull()], platform: "x", previous: cached)!
+        precondition(missing.quotedPost == cached.quotedPost)
+        let sparse = ScraperManager.parsePost(["id": "123", "quotedPost": ["id": "456", "text": "", "media": []]], platform: "x", previous: cached)!
+        precondition(sparse.quotedPost == cached.quotedPost)
+        let changedID = ScraperManager.parsePost(["id": "123", "quotedPost": ["id": "789", "text": "Different quote"]], platform: "x", previous: cached)!
+        precondition(changedID.quotedPost?.id == "789" && changedID.quotedPost?.author == "" && changedID.quotedPost?.media.isEmpty == true)
+        let wrongOuter = ScraperManager.parsePost(["id": "999", "text": "Different outer post"], platform: "x", previous: cached)!
+        precondition(wrongOuter.quotedPost == nil && wrongOuter.media.isEmpty)
+        let unavailable = ScraperManager.parsePost(["id": "123", "quotedPost": ["id": "456", "isUnavailable": true]], platform: "x", previous: cached)!
+        precondition(unavailable.quotedPost?.isUnavailable == true && unavailable.quotedPost?.text.isEmpty == true && unavailable.quotedPost?.media.isEmpty == true)
+        let afterUnavailable = ScraperManager.parsePost(["id": "123", "quotedPost": ["id": "456", "media": []]], platform: "x", previous: unavailable)!
+        precondition(afterUnavailable.quotedPost == unavailable.quotedPost)
+        let missingAfterUnavailable = ScraperManager.parsePost(["id": "123"], platform: "x", previous: unavailable)!
+        precondition(missingAfterUnavailable.quotedPost == unavailable.quotedPost)
+        let firstReady = Date(timeIntervalSince1970: 1_700_000_000)
+        precondition(ScraperManager.shouldFinishReady(firstReadyAt: firstReady, now: firstReady.addingTimeInterval(9), stablePasses: 2, posts: [quoteOnly]))
+        for field in ["author", "text", "timestamp", "media", "unavailable"] {
+            var changed = quoteOnly
+            switch field {
+            case "author": changed.quotedPost?.author = "Hydrated Name"
+            case "text": changed.quotedPost?.text = "Hydrated text"
+            case "timestamp": changed.quotedPost?.timestamp = firstReady
+            case "media": changed.quotedPost?.media = []
+            default: changed.quotedPost?.isUnavailable = true
+            }
+            precondition(ScraperManager.readySignature(for: [changed]) != ScraperManager.readySignature(for: [quoteOnly]))
+        }
+        var current = [quoteOnly]
+        let key = quoteOnly.quotedPost!.media[0].cacheKey
+        precondition(ScraperManager.applyCachedPreview(key + ".jpg", for: key, to: &current))
+        precondition(current[0].media.isEmpty && current[0].quotedPost?.media[0].localPreviewFile == key + ".jpg")
+        precondition(!ScraperManager.applyCachedPreview(key + ".jpg", for: key, to: &current))
+        current = [unavailable, changedID]
+        precondition(!ScraperManager.applyCachedPreview(key + ".jpg", for: key, to: &current))
+        precondition(current == [unavailable, changedID], "A late preview must not resurrect a removed quote or alter a different quote")
     }
 
     static func checkDownloader() {
@@ -108,6 +205,22 @@ struct ScraperRegression {
         while finished < 7 && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
         precondition(finished == 7 && successful == 4, "Preview bounds or image validation failed")
         precondition(PreviewFixtureProtocol.requestCount == 7 && PreviewFixtureProtocol.credentialsAbsent)
+        let quoteMedia = FeedMedia(kind: "image", url: "https://pbs.twimg.com/media/asyncQuote.png")
+        let outerMedia = FeedMedia(kind: "image", url: "https://pbs.twimg.com/media/asyncOuter.png")
+        var posts = [FeedPost(id: "321", platform: "x", author: "Outer", handle: "outer_fixture", text: "Outer caption",
+                              timestamp: .distantPast, likes: 0, reposts: 0, comments: 0, media: [outerMedia],
+                              quotedPost: FeedQuotedPost(id: "654", author: "Quoted", text: "Quoted caption", media: [quoteMedia]))]
+        var quoteFinished = false
+        downloader.enqueue(quoteMedia, source: "fixture") { filename in
+            precondition(filename != nil)
+            precondition(ScraperManager.applyCachedPreview(filename!, for: quoteMedia.cacheKey, to: &posts))
+            quoteFinished = true
+        }
+        let quoteDeadline = Date().addingTimeInterval(8)
+        while !quoteFinished && Date() < quoteDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        precondition(quoteFinished && posts[0].media[0].localPreviewFile == nil)
+        precondition(posts[0].quotedPost?.media[0].localPreviewFile == quoteMedia.cacheKey + ".jpg")
+        precondition(FeedMediaCache.imageURL(for: posts[0].quotedPost!.media[0], directory: directory) != nil)
         downloader.cancel()
     }
 
